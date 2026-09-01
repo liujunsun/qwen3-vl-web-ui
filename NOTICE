@@ -1,0 +1,24 @@
+Qwen3-VL Web UI
+Copyright 2026 Tan Zhen Wah
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+------------------------------------------------------------------------------
+Third-party attribution
+------------------------------------------------------------------------------
+
+This project contains code derived from the Qwen3-VL reference implementation:
+
+    Qwen3-VL — https://github.com/QwenLM/Qwen3-VL
+    Copyright the Qwen team, Alibaba Group
+    Licensed under the Apache License, Version 2.0
+
+Specifically, the message-transformation and generation logic in
+backend/app/inference.py and backend/app/model_runtime.py is adapted from
+`web_demo_mm.py` in that repository (functions `call_local_model`,
+`_transform_messages`, and the model/processor loading path). The backend
+server, streaming API, GPU preflight, and the entire frontend are original
+work.
+
+The Qwen3-VL model weights are distributed separately by Alibaba Group under
+their own license terms; see https://huggingface.co/Qwen for details.

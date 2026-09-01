@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Qwen3-VL</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="title">
+      <h1>Qwen3-VL</h1>
+      <span id="badge" class="badge" title="backend status">connecting…</span>
+    </div>
+    <div class="header-actions">
+      <button id="stage-toggle" class="ghost" hidden>🎬 Video</button>
+      <button id="regen-btn" class="ghost" disabled>Regenerate</button>
+      <button id="clear-btn" class="ghost">Clear</button>
+    </div>
+  </header>
+
+  <!-- Video stage: the loaded clip stays here, watchable/scrubbable while the model runs -->
+  <section id="stage" hidden>
+    <div class="stage-video-wrap">
+      <video id="player" playsinline controls preload="auto"></video>
+      <div id="stage-badge" class="stage-badge" hidden><span class="dot"></span><span id="stage-badge-text"></span></div>
+    </div>
+    <div class="stage-bar">
+      <span id="stage-name" class="stage-name"></span>
+      <span class="stage-spacer"></span>
+      <button id="stage-restart" class="ghost sm" title="Jump to start">⏮ Start</button>
+      <button id="stage-size" class="ghost sm" aria-pressed="false">⤢ Expand</button>
+      <button id="stage-hide" class="ghost sm">Hide</button>
+    </div>
+  </section>
+
+  <main id="transcript" class="transcript">
+    <div class="empty-hint">Load a video with ＋, ask a question, and watch it play while the model answers.</div>
+  </main>
+
+  <form id="composer" class="composer">
+    <div id="attachments" class="attachments"></div>
+    <div class="composer-row">
+      <label class="attach-btn" title="Attach image or video">
+        <input id="file-input" type="file" accept="image/*,video/*" hidden />
+        <span>＋</span>
+      </label>
+      <textarea id="input" rows="1" placeholder="Ask about the video…"></textarea>
+      <button id="send-btn" type="submit">Send</button>
+    </div>
+  </form>
+
+  <script src="app.js"></script>
+</body>
+</html>

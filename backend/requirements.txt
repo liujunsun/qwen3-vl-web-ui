@@ -1,0 +1,15 @@
+# Backend deps for the Qwen3-VL UI server.
+#
+# The model stack (torch, torchvision, accelerate, av, and the pinned transformers
+# build) lives in requirements-model.txt. Install that first if starting fresh:
+#
+#   pip install -r backend/requirements-model.txt
+#
+# Then this file adds only the web-server pieces:
+
+fastapi>=0.111
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+
+# Optional - only if you pass --flash-attn2 (Linux / prebuilt wheels; not on native Windows):
+# flash-attn

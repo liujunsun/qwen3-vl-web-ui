@@ -1,0 +1,20 @@
+# Model stack for the Qwen3-VL UI backend.
+#
+# Adapted from Qwen3-VL/requirements_web_demo.txt (QwenLM/Qwen3-VL, Apache-2.0),
+# with the Gradio demo dependencies removed - this project ships its own frontend.
+#
+# Install this first, then backend/requirements.txt:
+#
+#   pip install -r backend/requirements-model.txt
+#   pip install -r backend/requirements.txt
+
+# Pinned transformers build with Qwen3-VL support
+git+https://github.com/huggingface/transformers.git@7aa888b7fa477d13153ffbfe107dfbd6c696014a
+
+torch
+torchvision
+accelerate
+av              # video decoding for the processor
+
+# Optional - only if you pass --flash-attn2 (Linux / prebuilt wheels; not native Windows):
+# flash-attn

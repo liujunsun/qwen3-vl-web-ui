@@ -1,0 +1,28 @@
+# Upstream reference clone (QwenLM/Qwen3-VL) - not part of this project
+Qwen3-VL/
+
+# Sample clips - drop your own in here, they are not tracked
+Videos/*
+!Videos/.gitkeep
+
+# Runtime upload staging
+backend/.uploads/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Local tooling / editor
+.claude/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+*.env
