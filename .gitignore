@@ -1,12 +1,12 @@
-# Upstream reference clone (QwenLM/Qwen3-VL) - not part of this project
-Qwen3-VL/
-
 # Sample clips - drop your own in here, they are not tracked
 Videos/*
 !Videos/.gitkeep
 
 # Runtime upload staging
 backend/.uploads/
+
+# Generation defaults saved from the settings page (per-machine)
+backend/settings.json
 
 # Python
 __pycache__/

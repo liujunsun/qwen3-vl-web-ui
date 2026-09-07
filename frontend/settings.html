@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Qwen3-VL · Settings</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="settings-body">
+  <header class="app-header">
+    <div class="title">
+      <h1>Settings</h1>
+      <span id="badge" class="badge" title="backend status">connecting…</span>
+    </div>
+    <div class="header-actions">
+      <a class="btn-link ghost" href="index.html">← Back to chat</a>
+    </div>
+  </header>
+
+  <main class="settings-main">
+    <p class="settings-intro">
+      These apply to every new request — no model reload. Per-request values sent by the
+      API still win over anything set here.
+    </p>
+
+    <!-- Presets -->
+    <section class="card">
+      <h2>Presets</h2>
+      <p class="card-hint">Starting points for the video + length knobs. Fine-tune below.</p>
+      <div id="presets" class="preset-row"></div>
+    </section>
+
+    <!-- Video sampling -->
+    <section class="card">
+      <h2>Video sampling</h2>
+      <p class="card-hint">
+        The biggest lever on latency and VRAM. Frames become visual tokens, and the whole
+        conversation is re-encoded on every turn — so this cost is paid again on each
+        follow-up question about the same clip.
+      </p>
+      <div id="fields-video" class="fields"></div>
+
+      <div class="estimator">
+        <div class="estimator-head">
+          <strong>Cost for a clip of</strong>
+          <label>
+            <input id="est-duration" type="number" min="1" max="7200" step="1" value="30" />
+            <span>seconds</span>
+          </label>
+          <label>
+            <select id="est-res">
+              <option value="640x360">640×360</option>
+              <option value="1024x460">1024×460</option>
+              <option value="1280x720">1280×720</option>
+              <option value="1920x1080">1920×1080</option>
+            </select>
+          </label>
+        </div>
+        <div id="est-out" class="estimator-out">—</div>
+        <p id="est-note" class="estimator-note" hidden></p>
+      </div>
+    </section>
+
+    <!-- Generation -->
+    <section class="card">
+      <h2>Generation</h2>
+      <p class="card-hint">
+        Length cap and sampling. These change output style and worst-case response time,
+        not the cost of reading the video.
+      </p>
+      <div id="fields-gen" class="fields"></div>
+    </section>
+
+    <!-- Read-only launch flags -->
+    <section class="card">
+      <h2>Launch flags</h2>
+      <p class="card-hint">
+        Baked in at model load. Changing any of these means restarting the server with
+        different CLI flags — they are shown here for reference only.
+      </p>
+      <dl id="locked" class="locked-grid"></dl>
+    </section>
+  </main>
+
+  <footer class="settings-footer">
+    <span id="status" class="save-status"></span>
+    <span class="stage-spacer"></span>
+    <button id="reset-btn" class="ghost" title="Discard all saved overrides and go back to the CLI/env values this server was started with">Reset to launch defaults</button>
+    <button id="revert-btn" class="ghost" disabled>Revert changes</button>
+    <button id="save-btn" disabled>Save</button>
+  </footer>
+
+  <script src="settings.js"></script>
+</body>
+</html>

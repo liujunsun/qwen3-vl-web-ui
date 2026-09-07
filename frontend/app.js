@@ -32,9 +32,13 @@ const stageToggleEl = $("#stage-toggle");
 const stageHideEl = $("#stage-hide");
 const stageSizeEl = $("#stage-size");
 const stageRestartEl = $("#stage-restart");
+const stageDropEl = $("#stage-drop");
+const ctxPillEl = $("#ctx-pill");
 /** id of the video currently loaded in the stage player */
 let stageVideoId = null;
 let badgeTimer = null;
+/** turn object -> its rendered .msg element, so a turn can be un-rendered */
+const turnEls = new WeakMap();
 
 // ---------------------------------------------------------------------------
 // Health badge
@@ -128,8 +132,9 @@ async function send() {
   for (const a of media) content.push({ type: a.kind, id: a.id });
   if (text) content.push({ type: "text", text });
 
-  turns.push({ role: "user", content });
-  renderUserTurn(content, media);
+  const turn = { role: "user", content };
+  turns.push(turn);
+  renderUserTurn(turn, media);
 
   inputEl.value = "";
   inputEl.style.height = "auto";
@@ -158,6 +163,57 @@ function latestVideoId() {
   return null;
 }
 
+/** True when this upload id is still part of what gets POSTed to the model. */
+function inContext(id) {
+  return turns.some((t) => t.content.some((p) => p.id === id));
+}
+
+/** Reflect, in the stage bar, whether the staged clip is really in the model's context. */
+function updateContextUi() {
+  if (!stageVideoId) {
+    ctxPillEl.hidden = true;
+    stageDropEl.hidden = true;
+    return;
+  }
+  const on = inContext(stageVideoId);
+  ctxPillEl.textContent = on ? "In model context" : "Preview only";
+  ctxPillEl.classList.toggle("in", on);
+  ctxPillEl.hidden = false;
+  stageDropEl.hidden = !on;
+}
+
+/** Strip a video/image from every turn, so follow-up questions stop re-sending it.
+ * Removing the composer chip only ever affected the *next* message; once a turn is
+ * in `turns` the whole array is POSTed on every request, so history needs this too. */
+function dropFromContext(id) {
+  if (busy) return;
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const t = turns[i];
+    if (!t.content.some((p) => p.id === id)) continue;
+    t.content = t.content.filter((p) => p.id !== id);
+    const el = turnEls.get(t);
+    if (t.content.length === 0) {
+      // media-only turn: drop it and the reply it prompted, or the template sees
+      // an assistant message with nothing before it.
+      el?.remove();
+      turns.splice(i, 1);
+      if (turns[i] && turns[i].role === "assistant") {
+        turnEls.get(turns[i])?.remove();
+        turns.splice(i, 1);
+      }
+    } else {
+      el?.querySelector(`[data-media-id="${id}"]`)?.remove();
+    }
+  }
+  if (stageVideoId === id) showBadge("Dropped from context — still playable here", true);
+  if (turns.length === 0) {
+    transcriptEl.innerHTML =
+      '<div class="empty-hint">Load a video with ＋, ask a question, and watch it play while the model answers.</div>';
+  }
+  regenBtn.disabled = turns.length === 0;
+  updateContextUi();
+}
+
 /** Load a video into the stage player and reveal the stage. */
 function loadStage(id) {
   const m = mediaById.get(id);
@@ -171,6 +227,7 @@ function loadStage(id) {
   stageEl.hidden = false;
   stageToggleEl.hidden = false;
   stageToggleEl.setAttribute("aria-pressed", "true");
+  updateContextUi();
 }
 
 function showBadge(text, done = false) {
@@ -219,6 +276,9 @@ stageSizeEl.addEventListener("click", () => {
   try { localStorage.setItem("qwen.stageBig", stageEl.classList.contains("big") ? "1" : "0"); } catch {}
   syncStageSizeLabel();
 });
+stageDropEl.addEventListener("click", () => {
+  if (stageVideoId) dropFromContext(stageVideoId);
+});
 stageRestartEl.addEventListener("click", () => {
   try { playerEl.currentTime = 0; } catch {}
   playerEl.play().catch(() => {});
@@ -240,6 +300,8 @@ async function runGeneration() {
     if (!resp.ok) throw new Error((await safeJson(resp))?.detail || resp.statusText);
 
     for await (const evt of parseSSE(resp.body)) {
+      // Sent once, before the first token: what the current settings actually cost.
+      if (evt.stats) { renderGenStats(bubble, evt.stats); continue; }
       if (evt.delta != null) acc += evt.delta;
       else if (evt.replace != null) acc = evt.replace;
       else if (evt.done) break;
@@ -252,10 +314,13 @@ async function runGeneration() {
     bubble.innerHTML = renderMarkdown(acc);
   } finally {
     bubble.classList.remove("cursor");
-    turns.push({ role: "assistant", content: [{ type: "text", text: acc }] });
+    const aTurn = { role: "assistant", content: [{ type: "text", text: acc }] };
+    turns.push(aTurn);
+    turnEls.set(aTurn, bubble.parentElement);
     setBusy(false);
     regenBtn.disabled = turns.length === 0;
     endStagePlayback(acc.includes("**["));
+    updateContextUi();
     scrollToBottom();
   }
 }
@@ -283,6 +348,7 @@ clearBtn.addEventListener("click", async () => {
   stageBadgeEl.hidden = true;
   stageToggleEl.hidden = true;
   stageVideoId = null;
+  updateContextUi();
   for (const m of mediaById.values()) URL.revokeObjectURL(m.url);
   mediaById.clear();
   renderPending();
@@ -306,7 +372,8 @@ function clearHint() {
   transcriptEl.querySelector(".empty-hint")?.remove();
 }
 
-function renderUserTurn(content, media) {
+function renderUserTurn(turn, media) {
+  const content = turn.content;
   clearHint();
   const msg = document.createElement("div");
   msg.className = "msg user";
@@ -319,16 +386,19 @@ function renderUserTurn(content, media) {
     for (const a of media) {
       const chip = document.createElement("div");
       chip.className = "media-chip";
+      chip.dataset.mediaId = a.id;
       const url = a.previewUrl || mediaById.get(a.id)?.url;
       if (a.kind === "video" && url) {
         chip.innerHTML =
           `<video src="${url}" muted playsinline preload="metadata" class="chip-thumb"></video>` +
           `<span class="name">${escapeHtml(a.name)}</span>` +
-          `<button class="chip-load" title="Show this clip in the player">Open ▸</button>`;
+          `<button class="chip-load" title="Show this clip in the player">Open ▸</button>` +
+          `<button class="chip-drop" title="Remove this video from the conversation the model sees">✕</button>`;
         chip.querySelector(".chip-load").addEventListener("click", () => {
           loadStage(a.id);
           playerEl.play().catch(() => {});
         });
+        chip.querySelector(".chip-drop").addEventListener("click", () => dropFromContext(a.id));
       } else {
         chip.innerHTML =
           (url ? `<img src="${url}" alt="">` : `<span>🎬</span>`) +
@@ -346,7 +416,22 @@ function renderUserTurn(content, media) {
   }
   msg.appendChild(bubble);
   transcriptEl.appendChild(msg);
+  turnEls.set(turn, msg);
+  updateContextUi();
   scrollToBottom();
+}
+
+/** Small caption tying the answer back to the settings that produced it. */
+function renderGenStats(bubble, stats) {
+  const bits = [];
+  if (stats.frames?.length) bits.push(`${stats.frames.join(" + ")} frames`);
+  if (stats.images) bits.push(`${stats.images} image${stats.images === 1 ? "" : "s"}`);
+  if (stats.prompt_tokens) bits.push(`${stats.prompt_tokens.toLocaleString()} prompt tokens`);
+  if (!bits.length) return;
+  const el = document.createElement("div");
+  el.className = "gen-stats";
+  el.textContent = bits.join(" · ");
+  bubble.parentElement.appendChild(el);
 }
 
 function renderAssistantPlaceholder() {

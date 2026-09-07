@@ -16,6 +16,7 @@
       <button id="stage-toggle" class="ghost" hidden>🎬 Video</button>
       <button id="regen-btn" class="ghost" disabled>Regenerate</button>
       <button id="clear-btn" class="ghost">Clear</button>
+      <a class="btn-link ghost" href="settings.html" title="Generation defaults">⚙ Settings</a>
     </div>
   </header>
 
@@ -27,7 +28,9 @@
     </div>
     <div class="stage-bar">
       <span id="stage-name" class="stage-name"></span>
+      <span id="ctx-pill" class="ctx-pill" hidden></span>
       <span class="stage-spacer"></span>
+      <button id="stage-drop" class="ghost sm" title="Remove this video from the conversation the model sees" hidden>Drop from context</button>
       <button id="stage-restart" class="ghost sm" title="Jump to start">⏮ Start</button>
       <button id="stage-size" class="ghost sm" aria-pressed="false">⤢ Expand</button>
       <button id="stage-hide" class="ghost sm">Hide</button>

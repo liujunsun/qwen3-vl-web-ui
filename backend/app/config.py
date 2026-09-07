@@ -40,8 +40,10 @@ class Settings:
     # 'auto' splits across visible GPUs. 'cpu' forces CPU (slow).
     device: str = "cuda:0"
     flash_attn2: bool = False
-    video_fps: float = 1.0
-    video_max_frames: int = 128
+    # Upstream Qwen3-VL defaults: Qwen3VLVideoProcessor sets fps=2, max_frames=768,
+    # min_frames=4, and qwen_vl_utils.vision_process uses the same three values.
+    video_fps: float = 2.0
+    video_max_frames: int = 768
     max_new_tokens: int = 1024
     host: str = "127.0.0.1"
     port: int = 8000

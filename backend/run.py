@@ -37,10 +37,10 @@ def main() -> None:
                              "check (default: %(default)s).")
     parser.add_argument("--skip-preflight", action="store_true",
                         help="Skip the GPU cache-clear / VRAM preflight entirely.")
-    parser.add_argument("--video-fps", type=float, default=1.0,
-                        help="Frames per second sampled from input video (default: %(default)s)")
-    parser.add_argument("--video-max-frames", type=int, default=128,
-                        help="Max frames sampled from a video (default: %(default)s)")
+    parser.add_argument("--video-fps", type=float, default=2.0,
+                        help="Frames per second sampled from input video (default: %(default)s, the Qwen3-VL default)")
+    parser.add_argument("--video-max-frames", type=int, default=768,
+                        help="Max frames sampled from a video (default: %(default)s, the Qwen3-VL default)")
     parser.add_argument("--max-new-tokens", type=int, default=1024,
                         help="Default generation length (default: %(default)s)")
     parser.add_argument("--host", default="127.0.0.1")
