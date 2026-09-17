@@ -40,14 +40,26 @@ class Settings:
     # 'auto' splits across visible GPUs. 'cpu' forces CPU (slow).
     device: str = "cuda:0"
     flash_attn2: bool = False
-    # Upstream Qwen3-VL defaults: Qwen3VLVideoProcessor sets fps=2, max_frames=768,
-    # min_frames=4, and qwen_vl_utils.vision_process uses the same three values.
-    video_fps: float = 2.0
-    video_max_frames: int = 768
     max_new_tokens: int = 1024
+    # Every video question is answered chunk-by-chunk ("segmented analysis"); a video
+    # is never sampled and fed to the model as a single whole-clip pass. Frame cap /
+    # frame size are derived per chunk from the chunk's own duration (see
+    # video.optimize_video_params); fps is the constant `sample_fps` below, applied
+    # the same way to every chunk in a run.
+    segment_seconds: int = 60
+    segment_overlap_frames: int = 4
+    # Frames sampled per second of video, per chunk. Constant across every chunk in a
+    # run (including a shorter final chunk) rather than scaling with chunk length.
+    sample_fps: float = 4.0
+    # Analytics history: every segmented-analysis run is logged permanently (prompt,
+    # settings, per-chunk output, stats). The archived video copy is deleted after this
+    # many days to bound disk use; the record itself is kept forever. 0 = never archive
+    # the video at all (metadata/output only).
+    history_retention_days: int = 30
     host: str = "127.0.0.1"
     port: int = 8000
     upload_dir: Path = BACKEND_DIR / ".uploads"
+    history_dir: Path = BACKEND_DIR / ".history"
     frontend_dir: Path = PROJECT_DIR / "frontend"
 
     @classmethod
@@ -56,9 +68,11 @@ class Settings:
             checkpoint_path=_env_str("QWEN_CHECKPOINT", cls.checkpoint_path),
             device=_env_str("QWEN_DEVICE", cls.device),
             flash_attn2=_env_bool("QWEN_FLASH_ATTN2", cls.flash_attn2),
-            video_fps=_env_float("QWEN_VIDEO_FPS", cls.video_fps),
-            video_max_frames=_env_int("QWEN_VIDEO_MAX_FRAMES", cls.video_max_frames),
             max_new_tokens=_env_int("QWEN_MAX_NEW_TOKENS", cls.max_new_tokens),
+            segment_seconds=_env_int("QWEN_SEGMENT_SECONDS", cls.segment_seconds),
+            segment_overlap_frames=_env_int("QWEN_SEGMENT_OVERLAP_FRAMES", cls.segment_overlap_frames),
+            sample_fps=_env_float("QWEN_SAMPLE_FPS", cls.sample_fps),
+            history_retention_days=_env_int("QWEN_HISTORY_RETENTION_DAYS", cls.history_retention_days),
             host=_env_str("QWEN_HOST", cls.host),
             port=_env_int("QWEN_PORT", cls.port),
         )

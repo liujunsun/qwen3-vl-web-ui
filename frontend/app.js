@@ -32,8 +32,51 @@ const stageToggleEl = $("#stage-toggle");
 const stageHideEl = $("#stage-hide");
 const stageSizeEl = $("#stage-size");
 const stageRestartEl = $("#stage-restart");
-const stageDropEl = $("#stage-drop");
-const ctxPillEl = $("#ctx-pill");
+const stageAutoEl = $("#stage-auto");
+/** server-side chunking config, refreshed from /api/settings */
+let segCfg = { seconds: 60, fps: 4 };
+
+// answer style: layers an extra instruction onto the prompt so the answer's shape
+// matches the question ("concise" for yes/no/counting, "detailed" for descriptive /
+// reasoning). Only meaningful for a staged video (segmented analysis); the row that
+// shows these buttons is hidden otherwise. Remembered across visits.
+const answerStyleRowEl = $("#answer-style-row");
+const answerStyleBtns = document.querySelectorAll(".as-btn");
+let answerStyle = "auto";
+try {
+  const saved = localStorage.getItem("qwen.answerStyle");
+  if (saved === "auto" || saved === "concise" || saved === "detailed") answerStyle = saved;
+} catch {}
+
+function setAnswerStyle(style) {
+  answerStyle = style;
+  answerStyleBtns.forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.style === style)));
+  try { localStorage.setItem("qwen.answerStyle", style); } catch {}
+}
+answerStyleBtns.forEach((b) => b.addEventListener("click", () => setAnswerStyle(b.dataset.style)));
+setAnswerStyle(answerStyle);
+
+// Mirror of optimize_video_params() in backend/app/video.py.
+function optimizeVideoParams(seconds, fixedFps) {
+  const s = Math.max(1, Number(seconds) || 1);
+  const fps = fixedFps || (s <= 20 ? 6 : s <= 60 ? 4 : s <= 180 ? 2 : s <= 600 ? 1 : s <= 1800 ? 0.5 : 0.25);
+  const maxFrames = Math.min(1024, Math.max(48, Math.round(s * fps)));
+  const side = maxFrames <= 96 ? 0 : maxFrames <= 256 ? 1280 : maxFrames <= 512 ? 896 : 640;
+  return { fps, maxFrames, side };
+}
+
+/** Show, in the stage bar, what sampling each chunk of the loaded clip will get. */
+function updateStageAuto() {
+  const m = stageVideoId ? mediaById.get(stageVideoId) : null;
+  if (!m || !(m.duration > 0)) { stageAutoEl.hidden = true; return; }
+  const o = optimizeVideoParams(segCfg.seconds, segCfg.fps);
+  stageAutoEl.textContent =
+    `per ${fmtTs(segCfg.seconds)} chunk → ${o.fps} fps · ≤${o.maxFrames} frames · ` +
+    `${o.side ? o.side + "px" : "native"}`;
+  stageAutoEl.hidden = false;
+}
+/** live segmented run, or null. */
+let segRun = null;
 /** id of the video currently loaded in the stage player */
 let stageVideoId = null;
 let badgeTimer = null;
@@ -49,6 +92,7 @@ async function refreshHealth() {
     const h = await r.json();
     badgeEl.textContent = `${h.backend.toUpperCase()} · ${h.device} · ${shortModel(h.model)}`;
     badgeEl.className = "badge ok";
+    if (!refreshHealth._settingsOnce) { refreshHealth._settingsOnce = true; refreshSettings(); }
   } catch {
     badgeEl.textContent = "backend offline";
     badgeEl.className = "badge err";
@@ -56,6 +100,20 @@ async function refreshHealth() {
 }
 function shortModel(m) {
   return String(m).split("/").pop();
+}
+
+// Pull the chunk length from the settings page (every video question is chunked).
+async function refreshSettings() {
+  try {
+    const r = await fetch("/api/settings");
+    if (!r.ok) return;
+    const d = (await r.json()).defaults || {};
+    segCfg.seconds = Number(d.segment_seconds) || 60;
+    segCfg.fps = Number(d.sample_fps) || 4;
+  } catch {
+    /* leave the last known config in place */
+  }
+  updateStageAuto();
 }
 
 // ---------------------------------------------------------------------------
@@ -72,15 +130,15 @@ fileInputEl.addEventListener("change", async () => {
     if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
     const info = await r.json();
     const url = URL.createObjectURL(file);
-    mediaById.set(info.id, { kind: info.kind, name: info.name, url });
-    pending.push({
-      id: info.id,
-      kind: info.kind,
-      name: info.name,
-      previewUrl: info.kind === "image" ? url : null,
-    });
-    renderPending();
-    if (info.kind === "video") loadStage(info.id); // step 1: video shows immediately
+    mediaById.set(info.id, { kind: info.kind, name: info.name, url, duration: info.duration || 0 });
+    if (info.kind === "video") {
+      // Video never joins the text conversation - it only ever drives chunked
+      // analysis against the staged clip, so it doesn't become a composer chip.
+      loadStage(info.id);
+    } else {
+      pending.push({ id: info.id, kind: info.kind, name: info.name, previewUrl: url });
+      renderPending();
+    }
   } catch (e) {
     alert("Upload failed: " + e.message);
   }
@@ -125,6 +183,19 @@ inputEl.addEventListener("input", () => {
 async function send() {
   if (busy) return;
   const text = inputEl.value.trim();
+
+  // A staged video + a question always means chunked analysis, handled outside the
+  // normal `turns` conversation - there is no whole-clip chat path.
+  if (stageVideoId) {
+    if (!text) return;
+    inputEl.value = "";
+    inputEl.style.height = "auto";
+    pending = [];
+    renderPending();
+    await runSegmented(text);
+    return;
+  }
+
   if (!text && pending.length === 0) return;
 
   const content = [];
@@ -152,66 +223,9 @@ try {
 } catch {}
 syncStageSizeLabel();
 
-/** id of the most recent video anywhere in the conversation, or null. */
-function latestVideoId() {
-  for (let i = turns.length - 1; i >= 0; i--) {
-    if (turns[i].role !== "user") continue;
-    for (const part of turns[i].content) {
-      if (part.type === "video") return part.id;
-    }
-  }
-  return null;
-}
-
-/** True when this upload id is still part of what gets POSTed to the model. */
-function inContext(id) {
-  return turns.some((t) => t.content.some((p) => p.id === id));
-}
-
-/** Reflect, in the stage bar, whether the staged clip is really in the model's context. */
-function updateContextUi() {
-  if (!stageVideoId) {
-    ctxPillEl.hidden = true;
-    stageDropEl.hidden = true;
-    return;
-  }
-  const on = inContext(stageVideoId);
-  ctxPillEl.textContent = on ? "In model context" : "Preview only";
-  ctxPillEl.classList.toggle("in", on);
-  ctxPillEl.hidden = false;
-  stageDropEl.hidden = !on;
-}
-
-/** Strip a video/image from every turn, so follow-up questions stop re-sending it.
- * Removing the composer chip only ever affected the *next* message; once a turn is
- * in `turns` the whole array is POSTed on every request, so history needs this too. */
-function dropFromContext(id) {
-  if (busy) return;
-  for (let i = turns.length - 1; i >= 0; i--) {
-    const t = turns[i];
-    if (!t.content.some((p) => p.id === id)) continue;
-    t.content = t.content.filter((p) => p.id !== id);
-    const el = turnEls.get(t);
-    if (t.content.length === 0) {
-      // media-only turn: drop it and the reply it prompted, or the template sees
-      // an assistant message with nothing before it.
-      el?.remove();
-      turns.splice(i, 1);
-      if (turns[i] && turns[i].role === "assistant") {
-        turnEls.get(turns[i])?.remove();
-        turns.splice(i, 1);
-      }
-    } else {
-      el?.querySelector(`[data-media-id="${id}"]`)?.remove();
-    }
-  }
-  if (stageVideoId === id) showBadge("Dropped from context — still playable here", true);
-  if (turns.length === 0) {
-    transcriptEl.innerHTML =
-      '<div class="empty-hint">Load a video with ＋, ask a question, and watch it play while the model answers.</div>';
-  }
-  regenBtn.disabled = turns.length === 0;
-  updateContextUi();
+function fmtTs(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
 /** Load a video into the stage player and reveal the stage. */
@@ -227,8 +241,18 @@ function loadStage(id) {
   stageEl.hidden = false;
   stageToggleEl.hidden = false;
   stageToggleEl.setAttribute("aria-pressed", "true");
-  updateContextUi();
+  answerStyleRowEl.hidden = false;
+  updateStageAuto();
 }
+
+// If the backend couldn't read the duration, fall back to the browser's.
+playerEl.addEventListener("loadedmetadata", () => {
+  const m = stageVideoId ? mediaById.get(stageVideoId) : null;
+  if (m && !(m.duration > 0) && Number.isFinite(playerEl.duration)) {
+    m.duration = playerEl.duration;
+    updateStageAuto();
+  }
+});
 
 function showBadge(text, done = false) {
   clearTimeout(badgeTimer);
@@ -276,9 +300,6 @@ stageSizeEl.addEventListener("click", () => {
   try { localStorage.setItem("qwen.stageBig", stageEl.classList.contains("big") ? "1" : "0"); } catch {}
   syncStageSizeLabel();
 });
-stageDropEl.addEventListener("click", () => {
-  if (stageVideoId) dropFromContext(stageVideoId);
-});
 stageRestartEl.addEventListener("click", () => {
   try { playerEl.currentTime = 0; } catch {}
   playerEl.play().catch(() => {});
@@ -286,8 +307,6 @@ stageRestartEl.addEventListener("click", () => {
 
 async function runGeneration() {
   setBusy(true);
-  // step 3: video plays while the model generates the answer
-  if (latestVideoId()) { loadStage(latestVideoId()); playStageForGeneration(); }
   const bubble = renderAssistantPlaceholder();
   let acc = "";
 
@@ -320,10 +339,208 @@ async function runGeneration() {
     setBusy(false);
     regenBtn.disabled = turns.length === 0;
     endStagePlayback(acc.includes("**["));
-    updateContextUi();
     scrollToBottom();
   }
 }
+
+// ---------------------------------------------------------------------------
+// Segmented ("live view") analysis - every video question goes through this path.
+//
+// One question is answered chunk-by-chunk over a long video. The backend streams a
+// result per chunk as soon as it is ready; the player walks the clip in real time
+// and only ever reveals chunk k once chunk k-1's answer has landed. Each chunk is a
+// collapsible <details>. Chunks are independent - nothing is fed back into the model
+// and there is no final reconciliation pass.
+// ---------------------------------------------------------------------------
+function startSegPlayback() {
+  if (stageEl.hidden) { stageEl.hidden = false; stageToggleEl.setAttribute("aria-pressed", "true"); }
+  playerEl.loop = false;
+  try { playerEl.currentTime = 0; } catch {}
+  const p = playerEl.play();
+  if (p && p.catch) {
+    p.catch(() => { playerEl.muted = true; playerEl.play().catch(() => {}); });
+  }
+  showBadge("Playing — analysing each chunk as you watch…");
+}
+
+function renderSegBody(i) {
+  const body = segRun.cards[i]?.querySelector(".seg-body");
+  if (body) body.innerHTML = renderMarkdown(segRun.text[i] || "");
+}
+
+function setSegState(i, label, cls) {
+  const el = segRun.cards[i]?.querySelector(".seg-state");
+  if (!el) return;
+  el.textContent = label;
+  el.className = "seg-state" + (cls ? " " + cls : "");
+}
+
+async function runSegmented(prompt) {
+  setBusy(true);
+  clearHint();
+
+  const umsg = document.createElement("div");
+  umsg.className = "msg user";
+  const ub = document.createElement("div");
+  ub.className = "bubble";
+  ub.textContent = prompt;
+  umsg.appendChild(ub);
+  transcriptEl.appendChild(umsg);
+
+  const container = document.createElement("div");
+  container.className = "seg-run";
+  transcriptEl.appendChild(container);
+
+  segRun = {
+    segSec: segCfg.seconds || 60,
+    count: 0,
+    cards: [],
+    text: [],
+    done: new Set(),
+    playingIdx: -1,
+    waitingFor: null,
+    finished: false,
+    container,
+  };
+
+  startSegPlayback(); // synchronous, keeps the user-gesture activation for play()
+  scrollToBottom();
+
+  try {
+    const videoName = mediaById.get(stageVideoId)?.name || null;
+    const resp = await fetch("/api/chat/segmented", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        video_id: stageVideoId, prompt, video_name: videoName, answer_style: answerStyle,
+      }),
+    });
+    if (!resp.ok) throw new Error((await safeJson(resp))?.detail || resp.statusText);
+    for await (const evt of parseSSE(resp.body)) handleSegEvent(evt);
+  } catch (e) {
+    const err = document.createElement("div");
+    err.className = "seg-error";
+    err.textContent = `[${e.message}]`;
+    container.appendChild(err);
+    showBadge("Segmented analysis failed", true);
+    playerEl.pause();
+  } finally {
+    // Leave the clip playing on success — the whole point is to keep watching while
+    // the (already finished) analysis sits beside it. `finished` just stops the
+    // "wait for the next chunk" gate in the timeupdate handler.
+    if (segRun) segRun.finished = true;
+    setBusy(false);
+    scrollToBottom();
+  }
+}
+
+function handleSegEvent(evt) {
+  if (!segRun) return;
+
+  if (evt.plan) {
+    segRun.segSec = evt.plan.segment_seconds;
+    segRun.count = evt.plan.count;
+    for (const s of evt.plan.segments) {
+      const card = document.createElement("details");
+      card.className = "seg-card";
+      card.open = evt.plan.count === 1;
+      card.innerHTML =
+        `<summary>` +
+        `<span class="seg-tag">Chunk ${s.index + 1}/${evt.plan.count}</span>` +
+        `<span class="seg-range">${fmtTs(s.start)}–${fmtTs(s.end)}</span>` +
+        `<span class="seg-state">queued</span></summary>` +
+        `<div class="seg-body"></div>`;
+      segRun.container.appendChild(card);
+      segRun.cards[s.index] = card;
+      segRun.text[s.index] = "";
+    }
+    scrollToBottom();
+    return;
+  }
+
+  if (evt.segment_start != null) {
+    const i = evt.segment_start;
+    setSegState(i, "analysing…", "run");
+    if (segRun.cards[i]) segRun.cards[i].open = true;   // open while it streams
+    return;
+  }
+
+  if (evt.segment_stats) {
+    const { index, stats } = evt.segment_stats;
+    const card = segRun.cards[index];
+    if (card && !card.querySelector(".seg-stats")) {
+      const bits = [];
+      if (stats.frames?.length) bits.push(`${stats.frames.join(" + ")} frames`);
+      if (stats.frame_size) bits.push(`${stats.frame_size[0]}×${stats.frame_size[1]}`);
+      if (stats.prompt_tokens) bits.push(`${stats.prompt_tokens.toLocaleString()} prompt tokens`);
+      if (bits.length) {
+        const el = document.createElement("div");
+        el.className = "seg-stats";
+        el.textContent = bits.join(" · ");
+        card.appendChild(el);
+      }
+    }
+    return;
+  }
+
+  if (evt.segment_delta) {
+    segRun.text[evt.segment_delta.index] += evt.segment_delta.delta;
+    renderSegBody(evt.segment_delta.index);
+    return;
+  }
+  if (evt.segment_replace) {
+    segRun.text[evt.segment_replace.index] = evt.segment_replace.text;
+    renderSegBody(evt.segment_replace.index);
+    return;
+  }
+
+  if (evt.segment_done) {
+    const i = evt.segment_done.index;
+    if (evt.segment_done.text) segRun.text[i] = evt.segment_done.text;
+    renderSegBody(i);
+    segRun.done.add(i);
+    const errored = /\*\*\[/.test(segRun.text[i] || "");
+    setSegState(i, errored ? "error" : "done", errored ? "err" : "ok");
+    // Keep it open only if it is the chunk on screen; otherwise fold it away.
+    if (segRun.cards[i] && i !== segRun.playingIdx && !errored) segRun.cards[i].open = false;
+    // Playback was holding for this chunk's answer — let it go.
+    if (segRun.waitingFor === i) {
+      segRun.waitingFor = null;
+      playerEl.play().catch(() => {});
+      showBadge("Playing — analysing each chunk as you watch…");
+    }
+    return;
+  }
+
+  if (evt.done) {
+    showBadge(segRun.count > 1 ? "Analysis complete — scrub to review" : "Analysis complete", true);
+  }
+}
+
+// Keep the on-screen chunk aligned with the analysis: highlight + open the chunk
+// currently playing, fold the one we just left, and while the run is still streaming
+// never let playback run into a chunk whose predecessor isn't ready.
+playerEl.addEventListener("timeupdate", () => {
+  if (!segRun || !segRun.count) return;
+  const idx = Math.min(segRun.count - 1, Math.floor(playerEl.currentTime / segRun.segSec));
+
+  if (idx !== segRun.playingIdx) {
+    const left = segRun.playingIdx;
+    segRun.playingIdx = idx;
+    segRun.cards.forEach((c, k) => c && c.classList.toggle("playing", k === idx));
+    if (left >= 0 && segRun.done.has(left) && segRun.cards[left]) segRun.cards[left].open = false;
+    if (segRun.cards[idx]) segRun.cards[idx].open = true;
+    // Only chase the scroll position while the analysis is still streaming; once it's
+    // done, let the viewer read/scroll wherever they like as the clip plays on.
+    if (!segRun.finished) segRun.cards[idx]?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+
+  if (!segRun.finished && idx >= 1 && !segRun.done.has(idx - 1)) {
+    segRun.waitingFor = idx - 1;
+    playerEl.pause();
+    showBadge(`Paused — waiting for chunk ${idx} to finish analysing…`);
+  }
+});
 
 regenBtn.addEventListener("click", async () => {
   if (busy || turns.length === 0) return;
@@ -340,15 +557,18 @@ clearBtn.addEventListener("click", async () => {
   if (busy) return;
   turns = [];
   pending = [];
+  segRun = null;
   clearTimeout(badgeTimer);
   playerEl.pause();
+  playerEl.loop = false;
   playerEl.removeAttribute("src");
   playerEl.load();
   stageEl.hidden = true;
   stageBadgeEl.hidden = true;
   stageToggleEl.hidden = true;
+  stageAutoEl.hidden = true;
+  answerStyleRowEl.hidden = true;
   stageVideoId = null;
-  updateContextUi();
   for (const m of mediaById.values()) URL.revokeObjectURL(m.url);
   mediaById.clear();
   renderPending();
@@ -388,22 +608,9 @@ function renderUserTurn(turn, media) {
       chip.className = "media-chip";
       chip.dataset.mediaId = a.id;
       const url = a.previewUrl || mediaById.get(a.id)?.url;
-      if (a.kind === "video" && url) {
-        chip.innerHTML =
-          `<video src="${url}" muted playsinline preload="metadata" class="chip-thumb"></video>` +
-          `<span class="name">${escapeHtml(a.name)}</span>` +
-          `<button class="chip-load" title="Show this clip in the player">Open ▸</button>` +
-          `<button class="chip-drop" title="Remove this video from the conversation the model sees">✕</button>`;
-        chip.querySelector(".chip-load").addEventListener("click", () => {
-          loadStage(a.id);
-          playerEl.play().catch(() => {});
-        });
-        chip.querySelector(".chip-drop").addEventListener("click", () => dropFromContext(a.id));
-      } else {
-        chip.innerHTML =
-          (url ? `<img src="${url}" alt="">` : `<span>🎬</span>`) +
-          `<span class="name">${escapeHtml(a.name)}</span>`;
-      }
+      chip.innerHTML =
+        (url ? `<img src="${url}" alt="">` : `<span>🎬</span>`) +
+        `<span class="name">${escapeHtml(a.name)}</span>`;
       row.appendChild(chip);
     }
     bubble.appendChild(row);
@@ -417,7 +624,6 @@ function renderUserTurn(turn, media) {
   msg.appendChild(bubble);
   transcriptEl.appendChild(msg);
   turnEls.set(turn, msg);
-  updateContextUi();
   scrollToBottom();
 }
 
@@ -425,6 +631,7 @@ function renderUserTurn(turn, media) {
 function renderGenStats(bubble, stats) {
   const bits = [];
   if (stats.frames?.length) bits.push(`${stats.frames.join(" + ")} frames`);
+  if (stats.frame_size) bits.push(`${stats.frame_size[0]}×${stats.frame_size[1]}`);
   if (stats.images) bits.push(`${stats.images} image${stats.images === 1 ? "" : "s"}`);
   if (stats.prompt_tokens) bits.push(`${stats.prompt_tokens.toLocaleString()} prompt tokens`);
   if (!bits.length) return;
@@ -481,103 +688,12 @@ async function safeJson(resp) {
 }
 
 // ---------------------------------------------------------------------------
-// Minimal, dependency-free Markdown renderer
-// Handles: fenced code, headings, bold, italic, inline code, links,
-// unordered / ordered lists, paragraphs, line breaks. Everything is escaped.
-// ---------------------------------------------------------------------------
-function escapeHtml(s) {
-  return s.replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  }[c]));
-}
-
-function renderInline(s) {
-  s = escapeHtml(s);
-  s = s.replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`);
-  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
-  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
-    '<a href="$2" target="_blank" rel="noopener">$1</a>');
-  return s;
-}
-
-function renderMarkdown(md) {
-  const lines = md.split("\n");
-  let html = "";
-  let i = 0;
-  let listType = null; // 'ul' | 'ol' | null
-
-  const closeList = () => {
-    if (listType) { html += `</${listType}>`; listType = null; }
-  };
-
-  while (i < lines.length) {
-    const line = lines[i];
-
-    // fenced code block
-    const fence = line.match(/^```(\w*)\s*$/);
-    if (fence) {
-      closeList();
-      const lang = fence[1];
-      const body = [];
-      i++;
-      while (i < lines.length && !/^```\s*$/.test(lines[i])) { body.push(lines[i]); i++; }
-      i++; // skip closing fence
-      html += `<pre><code${lang ? ` class="language-${lang}"` : ""}>${escapeHtml(body.join("\n"))}</code></pre>`;
-      continue;
-    }
-
-    // headings
-    const h = line.match(/^(#{1,6})\s+(.*)$/);
-    if (h) {
-      closeList();
-      const level = h[1].length;
-      html += `<h${level}>${renderInline(h[2])}</h${level}>`;
-      i++;
-      continue;
-    }
-
-    // unordered list
-    if (/^\s*[-*+]\s+/.test(line)) {
-      if (listType !== "ul") { closeList(); html += "<ul>"; listType = "ul"; }
-      html += `<li>${renderInline(line.replace(/^\s*[-*+]\s+/, ""))}</li>`;
-      i++;
-      continue;
-    }
-    // ordered list
-    if (/^\s*\d+\.\s+/.test(line)) {
-      if (listType !== "ol") { closeList(); html += "<ol>"; listType = "ol"; }
-      html += `<li>${renderInline(line.replace(/^\s*\d+\.\s+/, ""))}</li>`;
-      i++;
-      continue;
-    }
-
-    // blank line
-    if (line.trim() === "") { closeList(); i++; continue; }
-
-    // paragraph (accumulate consecutive non-empty, non-special lines)
-    closeList();
-    const para = [line];
-    i++;
-    while (
-      i < lines.length &&
-      lines[i].trim() !== "" &&
-      !/^```/.test(lines[i]) &&
-      !/^(#{1,6})\s/.test(lines[i]) &&
-      !/^\s*[-*+]\s+/.test(lines[i]) &&
-      !/^\s*\d+\.\s+/.test(lines[i])
-    ) {
-      para.push(lines[i]);
-      i++;
-    }
-    html += `<p>${para.map(renderInline).join("<br>")}</p>`;
-  }
-  closeList();
-  return html;
-}
-
-// ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
 refreshHealth();
 setInterval(refreshHealth, 15000);
+refreshSettings();
+// The settings page is a separate tab — pick up a changed toggle on return.
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refreshSettings();
+});

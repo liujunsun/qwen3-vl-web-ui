@@ -34,11 +34,9 @@ class ModelRuntime:
         t0 = time.time()
         self.model = AutoModelForImageTextToText.from_pretrained(s.checkpoint_path, **load_kwargs)
         self.processor = AutoProcessor.from_pretrained(s.checkpoint_path)
-
-        # Cap visual tokens from video the same way the reference demo does.
-        if hasattr(self.processor, "video_processor"):
-            self.processor.video_processor.fps = s.video_fps
-            self.processor.video_processor.max_frames = s.video_max_frames
+        # video_processor.fps / .max_frames are never consulted: every video is pre-
+        # sampled by app.video.sample_frames_window and handed in with
+        # do_sample_frames=False, so the processor never samples frames itself.
 
         self.model.eval()
         print(f"[model] loaded in {time.time() - t0:.1f}s", flush=True)

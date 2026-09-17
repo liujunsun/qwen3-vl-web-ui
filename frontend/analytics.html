@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Analytics · Qwen3-VL · SP</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="settings-body">
+  <header class="app-header">
+    <div class="title">
+      <span class="brand-mark" aria-hidden="true">SP</span>
+      <div class="brand-lines">
+        <h1>Analytics</h1>
+        <span class="brand-sub">Singapore Polytechnic · Qwen3-VL</span>
+      </div>
+      <span id="badge" class="badge" title="backend status">connecting…</span>
+    </div>
+    <div class="header-actions">
+      <a class="btn-link ghost" href="settings.html" title="Generation defaults">⚙ Settings</a>
+      <a class="btn-link ghost" href="index.html">← Back to chat</a>
+    </div>
+  </header>
+
+  <main class="settings-main analytics-main">
+    <p class="settings-intro">
+      Every question you ask about a video is logged here — the prompt, the settings
+      used, the per-chunk output, and timing — so you can see how the tool is actually
+      saving you time. Archived video files age out after the server's retention
+      window; the record and stats stay forever.
+    </p>
+
+    <!-- Filters + export -->
+    <section class="card">
+      <div class="filter-row">
+        <input id="f-search" type="search" placeholder="Search prompt or video name…" />
+        <label class="filter-date">From <input id="f-from" type="date" /></label>
+        <label class="filter-date">To <input id="f-to" type="date" /></label>
+        <button id="f-apply" class="ghost sm" type="button">Apply</button>
+        <button id="f-clear" class="ghost sm" type="button">Clear</button>
+        <span class="stage-spacer"></span>
+        <button id="export-csv" class="ghost sm" type="button">Export CSV</button>
+        <button id="export-json" class="ghost sm" type="button">Export JSON</button>
+      </div>
+    </section>
+
+    <!-- Headline stats -->
+    <section id="stat-grid" class="stat-grid"></section>
+
+    <!-- Charts -->
+    <section class="card">
+      <h2>Cumulative time saved</h2>
+      <p class="card-hint">
+        Running total of video duration minus the time you actually waited for an
+        answer — the whole point of asking instead of watching, growing as you go.
+      </p>
+      <div id="chart-time-saved" class="chart"></div>
+    </section>
+
+    <section class="card">
+      <h2>Prompts per day</h2>
+      <p class="card-hint">How many videos you asked a question about, per day.</p>
+      <div id="chart-prompts" class="chart"></div>
+    </section>
+
+    <section class="card">
+      <h2>Answer style used</h2>
+      <p class="card-hint">
+        Share of runs asking for Auto, Concise (yes/no/counting), or Detailed
+        (explanation) answers.
+      </p>
+      <div id="chart-answer-style" class="chart chart-segbar"></div>
+    </section>
+
+    <section class="card">
+      <h2>Clip length distribution</h2>
+      <p class="card-hint">How long the analyzed videos tend to be.</p>
+      <div id="chart-duration" class="chart"></div>
+    </section>
+
+    <section class="card">
+      <h2>Clip length vs. processing time</h2>
+      <p class="card-hint">
+        Each dot is one run — how long the clip was (x-axis) against how long you
+        actually waited for an answer (y-axis). Red dots errored.
+      </p>
+      <div id="chart-efficiency" class="chart"></div>
+    </section>
+
+    <!-- History table -->
+    <section class="card">
+      <h2>History</h2>
+      <div class="table-wrap">
+        <table class="history-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Video</th>
+              <th>Duration</th>
+              <th>Prompt</th>
+              <th>Chunks</th>
+              <th>Time saved</th>
+              <th>Status</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="history-tbody"></tbody>
+        </table>
+      </div>
+      <div class="table-pager">
+        <button id="page-prev" class="ghost sm" type="button">◂ Prev</button>
+        <span id="page-info" class="page-info"></span>
+        <button id="page-next" class="ghost sm" type="button">Next ▸</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- Run detail modal -->
+  <div id="detail-modal" class="modal-overlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="detail-title">
+      <div class="modal-head">
+        <h3 id="detail-title">Run detail</h3>
+        <button id="detail-close" class="ghost sm" type="button">✕</button>
+      </div>
+      <div id="detail-body" class="modal-body"></div>
+    </div>
+  </div>
+
+  <script src="markdown.js"></script>
+  <script src="analytics.js"></script>
+</body>
+</html>

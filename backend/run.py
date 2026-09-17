@@ -37,12 +37,20 @@ def main() -> None:
                              "check (default: %(default)s).")
     parser.add_argument("--skip-preflight", action="store_true",
                         help="Skip the GPU cache-clear / VRAM preflight entirely.")
-    parser.add_argument("--video-fps", type=float, default=2.0,
-                        help="Frames per second sampled from input video (default: %(default)s, the Qwen3-VL default)")
-    parser.add_argument("--video-max-frames", type=int, default=768,
-                        help="Max frames sampled from a video (default: %(default)s, the Qwen3-VL default)")
     parser.add_argument("--max-new-tokens", type=int, default=1024,
                         help="Default generation length (default: %(default)s)")
+    parser.add_argument("--segment-seconds", type=int, default=60,
+                        help="Seconds of video per chunk - every video question is answered "
+                             "chunk-by-chunk (default: %(default)s)")
+    parser.add_argument("--segment-overlap-frames", type=int, default=4,
+                        help="Frames of the previous chunk carried into the next (default: %(default)s)")
+    parser.add_argument("--sample-fps", type=float, default=4.0,
+                        help="Frames sampled per second of video, per chunk - the same rate for "
+                             "every chunk in a run (default: %(default)s)")
+    parser.add_argument("--history-retention-days", type=int, default=30,
+                        help="Every segmented-analysis run is logged permanently for the analytics "
+                             "dashboard; the archived video copy is deleted after this many days to "
+                             "bound disk use (0 = never archive the video at all). Default: %(default)s")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--reload", action="store_true", help="Dev auto-reload (reloads the model too).")
@@ -51,9 +59,11 @@ def main() -> None:
     os.environ["QWEN_CHECKPOINT"] = args.checkpoint_path
     os.environ["QWEN_DEVICE"] = args.device
     os.environ["QWEN_FLASH_ATTN2"] = "1" if args.flash_attn2 else "0"
-    os.environ["QWEN_VIDEO_FPS"] = str(args.video_fps)
-    os.environ["QWEN_VIDEO_MAX_FRAMES"] = str(args.video_max_frames)
     os.environ["QWEN_MAX_NEW_TOKENS"] = str(args.max_new_tokens)
+    os.environ["QWEN_SEGMENT_SECONDS"] = str(args.segment_seconds)
+    os.environ["QWEN_SEGMENT_OVERLAP_FRAMES"] = str(args.segment_overlap_frames)
+    os.environ["QWEN_SAMPLE_FPS"] = str(args.sample_fps)
+    os.environ["QWEN_HISTORY_RETENTION_DAYS"] = str(args.history_retention_days)
     os.environ["QWEN_HOST"] = args.host
     os.environ["QWEN_PORT"] = str(args.port)
     os.environ["QWEN_FREE_OLLAMA"] = "1" if args.free_ollama else "0"

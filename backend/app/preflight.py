@@ -289,8 +289,8 @@ def preflight(device: str, *, free_ollama: bool = True, min_free_gb: float = 0.0
         free_gb = target / 1024
         if free_gb < min_free_gb:
             msg = (f"[preflight] LOW VRAM: {free_gb:.1f} GB free on target "
-                   f"(need >= {min_free_gb:.1f} GB). Stop other GPU jobs or use --device auto / "
-                   f"smaller --video-max-frames.")
+                   f"(need >= {min_free_gb:.1f} GB). Stop other GPU jobs, use --device auto, or "
+                   f"a shorter --segment-seconds so each chunk samples fewer frames.")
             if strict:
                 print(msg)
                 raise SystemExit(3)

@@ -3,16 +3,21 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Qwen3-VL · Settings</title>
+  <title>Settings · Qwen3-VL · SP</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body class="settings-body">
   <header class="app-header">
     <div class="title">
-      <h1>Settings</h1>
+      <span class="brand-mark" aria-hidden="true">SP</span>
+      <div class="brand-lines">
+        <h1>Settings</h1>
+        <span class="brand-sub">Singapore Polytechnic · Qwen3-VL</span>
+      </div>
       <span id="badge" class="badge" title="backend status">connecting…</span>
     </div>
     <div class="header-actions">
+      <a class="btn-link ghost" href="analytics.html" title="Usage history &amp; stats">📊 Analytics</a>
       <a class="btn-link ghost" href="index.html">← Back to chat</a>
     </div>
   </header>
@@ -23,51 +28,22 @@
       API still win over anything set here.
     </p>
 
-    <!-- Presets -->
+    <!-- Video chunking -->
     <section class="card">
-      <h2>Presets</h2>
-      <p class="card-hint">Starting points for the video + length knobs. Fine-tune below.</p>
-      <div id="presets" class="preset-row"></div>
-    </section>
-
-    <!-- Video sampling -->
-    <section class="card">
-      <h2>Video sampling</h2>
+      <h2>Video chunking</h2>
       <p class="card-hint">
-        The biggest lever on latency and VRAM. Frames become visual tokens, and the whole
-        conversation is re-encoded on every turn — so this cost is paid again on each
-        follow-up question about the same clip.
+        Every video question is answered chunk-by-chunk, streaming a separate answer for
+        each chunk as the clip plays — there is no whole-clip pass. Frame cap and frame
+        size are derived automatically from each chunk's length and its sampling rate
+        below, which stays constant across every chunk in a run.
       </p>
-      <div id="fields-video" class="fields"></div>
-
-      <div class="estimator">
-        <div class="estimator-head">
-          <strong>Cost for a clip of</strong>
-          <label>
-            <input id="est-duration" type="number" min="1" max="7200" step="1" value="30" />
-            <span>seconds</span>
-          </label>
-          <label>
-            <select id="est-res">
-              <option value="640x360">640×360</option>
-              <option value="1024x460">1024×460</option>
-              <option value="1280x720">1280×720</option>
-              <option value="1920x1080">1920×1080</option>
-            </select>
-          </label>
-        </div>
-        <div id="est-out" class="estimator-out">—</div>
-        <p id="est-note" class="estimator-note" hidden></p>
-      </div>
+      <div id="fields-segment" class="fields"></div>
     </section>
 
     <!-- Generation -->
     <section class="card">
       <h2>Generation</h2>
-      <p class="card-hint">
-        Length cap and sampling. These change output style and worst-case response time,
-        not the cost of reading the video.
-      </p>
+      <p class="card-hint">Ceiling on how long a response can get.</p>
       <div id="fields-gen" class="fields"></div>
     </section>
 

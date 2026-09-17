@@ -3,56 +3,80 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Qwen3-VL</title>
+  <title>Qwen3-VL · SP</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <header class="app-header">
     <div class="title">
-      <h1>Qwen3-VL</h1>
+      <span class="brand-mark" aria-hidden="true">SP</span>
+      <div class="brand-lines">
+        <h1>Qwen3-VL</h1>
+        <span class="brand-sub">Singapore Polytechnic</span>
+      </div>
       <span id="badge" class="badge" title="backend status">connecting…</span>
     </div>
     <div class="header-actions">
       <button id="stage-toggle" class="ghost" hidden>🎬 Video</button>
       <button id="regen-btn" class="ghost" disabled>Regenerate</button>
       <button id="clear-btn" class="ghost">Clear</button>
+      <a class="btn-link ghost" href="analytics.html" title="Usage history &amp; stats">📊 Analytics</a>
       <a class="btn-link ghost" href="settings.html" title="Generation defaults">⚙ Settings</a>
     </div>
   </header>
 
-  <!-- Video stage: the loaded clip stays here, watchable/scrubbable while the model runs -->
-  <section id="stage" hidden>
-    <div class="stage-video-wrap">
-      <video id="player" playsinline controls preload="auto"></video>
-      <div id="stage-badge" class="stage-badge" hidden><span class="dot"></span><span id="stage-badge-text"></span></div>
-    </div>
-    <div class="stage-bar">
-      <span id="stage-name" class="stage-name"></span>
-      <span id="ctx-pill" class="ctx-pill" hidden></span>
-      <span class="stage-spacer"></span>
-      <button id="stage-drop" class="ghost sm" title="Remove this video from the conversation the model sees" hidden>Drop from context</button>
-      <button id="stage-restart" class="ghost sm" title="Jump to start">⏮ Start</button>
-      <button id="stage-size" class="ghost sm" aria-pressed="false">⤢ Expand</button>
-      <button id="stage-hide" class="ghost sm">Hide</button>
-    </div>
-  </section>
+  <!-- On a wide screen the video sits beside the chat; on a narrow one it stacks on top. -->
+  <div class="workspace">
+    <!-- Video stage: the loaded clip stays here, watchable/scrubbable while the model runs -->
+    <section id="stage" hidden>
+      <div class="stage-video-wrap">
+        <video id="player" playsinline controls preload="auto"></video>
+        <div id="stage-badge" class="stage-badge" hidden><span class="dot"></span><span id="stage-badge-text"></span></div>
+      </div>
+      <div class="stage-bar">
+        <span id="stage-name" class="stage-name"></span>
+        <span id="stage-auto" class="stage-auto" hidden title="Sampling for each chunk of this clip"></span>
+        <span class="stage-spacer"></span>
+        <button id="stage-restart" class="ghost sm" title="Jump to start">⏮ Start</button>
+        <button id="stage-size" class="ghost sm" aria-pressed="false">⤢ Expand</button>
+        <button id="stage-hide" class="ghost sm">Hide</button>
+      </div>
+    </section>
 
-  <main id="transcript" class="transcript">
-    <div class="empty-hint">Load a video with ＋, ask a question, and watch it play while the model answers.</div>
-  </main>
+    <div class="chat-col">
+      <main id="transcript" class="transcript">
+        <div class="empty-hint">Load a video with ＋, ask a question, and watch it play while the model answers.</div>
+      </main>
 
-  <form id="composer" class="composer">
-    <div id="attachments" class="attachments"></div>
-    <div class="composer-row">
-      <label class="attach-btn" title="Attach image or video">
-        <input id="file-input" type="file" accept="image/*,video/*" hidden />
-        <span>＋</span>
-      </label>
-      <textarea id="input" rows="1" placeholder="Ask about the video…"></textarea>
-      <button id="send-btn" type="submit">Send</button>
+      <form id="composer" class="composer">
+        <div id="attachments" class="attachments"></div>
+
+        <!-- Only meaningful for a staged video (segmented analysis); hidden otherwise -->
+        <div id="answer-style-row" class="answer-style-row" hidden>
+          <span class="answer-style-label">Answer style</span>
+          <div class="answer-style-toggle" role="radiogroup" aria-label="Answer style">
+            <button type="button" class="as-btn" data-style="auto" aria-pressed="true"
+                    title="No extra instruction — the model judges the answer's length itself">Auto</button>
+            <button type="button" class="as-btn" data-style="concise" aria-pressed="false"
+                    title="For yes/no or counting questions — bare 'Yes'/'No' or a number, nothing else">Concise</button>
+            <button type="button" class="as-btn" data-style="detailed" aria-pressed="false"
+                    title="For descriptive or reasoning questions — a short explanation">Detailed</button>
+          </div>
+        </div>
+
+        <div class="composer-row">
+          <label class="attach-btn" title="Attach image or video">
+            <input id="file-input" type="file" accept="image/*,video/*" hidden />
+            <span>＋</span>
+          </label>
+          <textarea id="input" rows="1" placeholder="Ask about the video…"></textarea>
+          <button id="send-btn" type="submit">Send</button>
+        </div>
+      </form>
     </div>
-  </form>
+  </div>
 
+  <script src="markdown.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

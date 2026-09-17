@@ -11,7 +11,12 @@
 #     per-request options  >  saved override (settings.json)  >  launch default (CLI/env)
 #
 # Only knobs that need no reload live here. checkpoint_path / device / flash_attn2 are
-# baked into `from_pretrained` and are deliberately NOT editable at runtime.
+# baked into `from_pretrained` and are deliberately NOT editable at runtime. Every video
+# is analysed chunk-by-chunk; each chunk's frame cap / frame size are derived
+# automatically from its own duration (see video.optimize_video_params), while its
+# sampling rate (fps) is the constant `sample_fps` knob below - the same for every
+# chunk in a run. Generation always samples with the checkpoint's own generation_config
+# (no temperature / top-p / top-k override).
 import json
 import math
 import threading
@@ -31,44 +36,26 @@ FIELD_SPEC: Dict[str, Dict[str, Any]] = {
         "help": "Ceiling on response length. A cap, not a target - generation still stops at "
                 "EOS, so raising it costs nothing unless the model actually uses it.",
     },
-    "temperature": {
-        "kind": "float", "min": 0.0, "max": 2.0, "step": 0.05,
-        "label": "Temperature",
-        "help": "0 = greedy and deterministic (sampling off). Higher = more varied wording.",
+    "segment_seconds": {
+        "kind": "int", "min": 10, "max": 7200, "step": 10,
+        "label": "Chunk length (seconds)",
+        "help": "Every video question is answered chunk-by-chunk. Seconds of source video per "
+                "chunk - shorter means more chunks, each cheaper and quicker to first answer; "
+                "longer means fewer chunks with more context each.",
     },
-    "top_p": {
-        "kind": "float", "min": 0.05, "max": 1.0, "step": 0.05,
-        "label": "Top-p",
-        "help": "Nucleus sampling cutoff. Ignored when temperature is 0.",
+    "segment_overlap_frames": {
+        "kind": "int", "min": 0, "max": 240, "step": 1,
+        "label": "Carry-over frames",
+        "help": "Sampled frames from the end of the previous chunk prepended to the next one, "
+                "so a cut that lands on a frozen or black frame still has live context.",
     },
-    "top_k": {
-        "kind": "int", "min": 0, "max": 200, "step": 1,
-        "label": "Top-k",
-        "help": "0 disables top-k. Ignored when temperature is 0.",
+    "sample_fps": {
+        "kind": "float", "min": 0.1, "max": 10.0, "step": 0.1,
+        "label": "Sampling rate (fps)",
+        "help": "Frames sampled per second of video, per chunk - the same rate for every chunk "
+                "in a run, including a shorter final chunk. Frame cap and frame size are still "
+                "derived automatically from this rate and each chunk's length.",
     },
-    "video_fps": {
-        "kind": "float", "min": 0.1, "max": 8.0, "step": 0.1,
-        "label": "Video FPS",
-        "help": "Frames sampled per second of video. Binds on short clips; on long clips the "
-                "frame cap takes over first.",
-    },
-    "video_max_frames": {
-        "kind": "int", "min": 4, "max": 768, "step": 4,
-        "label": "Video max frames",
-        "help": "Hard cap on sampled frames. The single biggest lever on prompt length, VRAM "
-                "and time-to-first-token for video.",
-    },
-}
-
-# Named starting points, shown as one-click presets in the UI.
-PRESETS: Dict[str, Dict[str, Any]] = {
-    "fast": {"video_fps": 0.5, "video_max_frames": 24, "max_new_tokens": 512},
-    "balanced": {"video_fps": 1.0, "video_max_frames": 64, "max_new_tokens": 1024},
-    # More frames than this stops buying detail on a long clip: past the model's pixel
-    # budget the frames get downscaled, so a lower cap keeps more spatial resolution.
-    "detailed": {"video_fps": 2.0, "video_max_frames": 256, "max_new_tokens": 2048},
-    # What Qwen3-VL itself uses when nothing overrides it.
-    "qwen default": {"video_fps": 2.0, "video_max_frames": 768, "max_new_tokens": 1024},
 }
 
 
@@ -77,11 +64,9 @@ class GenerationDefaults:
     """The live-editable knobs. Frozen so it is swapped atomically, never mutated."""
 
     max_new_tokens: int = 1024
-    temperature: float = 0.7
-    top_p: float = 0.8
-    top_k: int = 20
-    video_fps: float = 2.0
-    video_max_frames: int = 768
+    segment_seconds: int = 60
+    segment_overlap_frames: int = 4
+    sample_fps: float = 4.0
 
     def as_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -90,6 +75,10 @@ class GenerationDefaults:
 def coerce(field: str, value: Any) -> Any:
     """Clamp `value` into the field's declared range. Raises ValueError if unusable."""
     spec = FIELD_SPEC[field]
+    if spec["kind"] == "bool":
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(value)
     try:
         num = int(round(float(value))) if spec["kind"] == "int" else float(value)
     except (TypeError, ValueError):
@@ -106,28 +95,14 @@ class _Store:
         self._current = GenerationDefaults()
         self._saved_keys: Set[str] = set()
 
-    def init(self, settings: Settings, generation_config: Optional[Any] = None) -> None:
+    def init(self, settings: Settings) -> None:
         """Seed launch defaults from the CLI/env, then layer saved overrides on top."""
         launch = GenerationDefaults(
             max_new_tokens=settings.max_new_tokens,
-            video_fps=settings.video_fps,
-            video_max_frames=settings.video_max_frames,
+            segment_seconds=settings.segment_seconds,
+            segment_overlap_frames=settings.segment_overlap_frames,
+            sample_fps=settings.sample_fps,
         )
-        # Sampling params have no CLI flag, so take the checkpoint's own generation_config;
-        # the UI then opens showing what the model would actually have done.
-        if generation_config is not None:
-            picked: Dict[str, Any] = {}
-            for field in ("temperature", "top_p", "top_k"):
-                value = getattr(generation_config, field, None)
-                if value is not None:
-                    try:
-                        picked[field] = coerce(field, value)
-                    except ValueError:
-                        pass
-            # do_sample=False in the checkpoint means greedy; surface that as temperature 0.
-            if getattr(generation_config, "do_sample", True) is False:
-                picked["temperature"] = 0.0
-            launch = replace(launch, **picked)
 
         with self._lock:
             self._launch = launch

@@ -5,6 +5,9 @@ Videos/*
 # Runtime upload staging
 backend/.uploads/
 
+# Analytics history (SQLite DB + archived videos) - per-machine runtime data
+backend/.history/
+
 # Generation defaults saved from the settings page (per-machine)
 backend/settings.json
 
