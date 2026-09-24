@@ -51,6 +51,13 @@ class Settings:
     # Frames sampled per second of video, per chunk. Constant across every chunk in a
     # run (including a shorter final chunk) rather than scaling with chunk length.
     sample_fps: float = 4.0
+    # Cap on visual tokens per chunk. The processor spreads a fixed pixel budget over
+    # however many frames it gets, so fewer frames just means bigger frames - this is
+    # the knob that actually bounds VRAM. 12288 matches the processor's own default.
+    max_video_tokens: int = 4096
+    # Skip a chunk (no model call) when less than this % of the picture changes.
+    # 0 turns it off. See video.motion_score for how it is measured.
+    motion_threshold: float = 1.0
     # Analytics history: every segmented-analysis run is logged permanently (prompt,
     # settings, per-chunk output, stats). The archived video copy is deleted after this
     # many days to bound disk use; the record itself is kept forever. 0 = never archive
@@ -72,6 +79,8 @@ class Settings:
             segment_seconds=_env_int("QWEN_SEGMENT_SECONDS", cls.segment_seconds),
             segment_overlap_frames=_env_int("QWEN_SEGMENT_OVERLAP_FRAMES", cls.segment_overlap_frames),
             sample_fps=_env_float("QWEN_SAMPLE_FPS", cls.sample_fps),
+            max_video_tokens=_env_int("QWEN_MAX_VIDEO_TOKENS", cls.max_video_tokens),
+            motion_threshold=_env_float("QWEN_MOTION_THRESHOLD", cls.motion_threshold),
             history_retention_days=_env_int("QWEN_HISTORY_RETENTION_DAYS", cls.history_retention_days),
             host=_env_str("QWEN_HOST", cls.host),
             port=_env_int("QWEN_PORT", cls.port),

@@ -5,12 +5,17 @@
 # original Gradio demo, which was fine because it also loaded once - but here we make
 # the "load once, warm up, then serve" contract explicit.
 import gc
+import os
 import time
 
 import torch
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
 from .config import Settings
+
+# VRAM left for everything else (desktop compositor, browser, ...) when capping
+# PyTorch's share of the GPU - see ModelRuntime._cap_vram.
+VRAM_HEADROOM_GB = float(os.environ.get("QWEN_VRAM_HEADROOM_GB", "0.5"))
 
 
 class ModelRuntime:
@@ -19,6 +24,9 @@ class ModelRuntime:
         self.model = None
         self.processor = None
         self.backend = "hf"
+        # Set after an unrecoverable CUDA error: the context is poisoned, so the process
+        # exits once the current response is flushed and run.py's supervisor restarts it.
+        self.faulted = False
 
     # --- loading -----------------------------------------------------------------
     def load(self) -> None:
@@ -40,6 +48,31 @@ class ModelRuntime:
 
         self.model.eval()
         print(f"[model] loaded in {time.time() - t0:.1f}s", flush=True)
+        self._cap_vram()
+
+    def _cap_vram(self) -> None:
+        """Stop PyTorch from growing past the VRAM that is actually free.
+
+        On Windows the NVIDIA driver's "sysmem fallback" lets an allocation that doesn't
+        fit spill into shared system RAM instead of failing. Nothing errors - every
+        chunk just runs ~3x slower (measured: 10.9 GB dedicated + 3.7 GB spilled, 110s
+        -> 350s for the same run). Capping PyTorch just under what's free turns that
+        into a normal OOM, which generate_chunk recovers from. On hitting the cap
+        PyTorch first releases its own cached blocks and retries, so only real demand
+        past the cap raises.
+        """
+        if not torch.cuda.is_available() or not str(self.settings.device).startswith("cuda"):
+            return
+        idx = torch.device(self.settings.device).index or 0
+        free, total = torch.cuda.mem_get_info(idx)
+        headroom = int(VRAM_HEADROOM_GB * 1024**3)
+        limit = torch.cuda.memory_reserved(idx) + free - headroom
+        if limit <= 0:
+            return
+        torch.cuda.set_per_process_memory_fraction(min(1.0, limit / total), idx)
+        print(f"[model] VRAM cap {limit / 1024**3:.1f} GB of {total / 1024**3:.1f} GB "
+              f"(keeps {VRAM_HEADROOM_GB:g} GB free for the desktop and other apps, so an "
+              f"overflow raises OOM instead of spilling into system RAM)", flush=True)
 
     # --- warmup ----------------------------------------------------------------
     def warmup(self) -> None:

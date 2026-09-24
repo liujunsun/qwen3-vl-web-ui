@@ -6,6 +6,7 @@ import json
 import os
 import time
 import uuid
+from dataclasses import replace
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -16,7 +17,14 @@ from starlette.concurrency import iterate_in_threadpool
 
 from . import history
 from .config import Settings
-from .inference import build_messages, is_video_file, resolve_options, stream_generate
+from .timeline import CONCISE_MAX_NEW_TOKENS, Timeline, normalize_answer
+from .inference import (
+    build_messages,
+    generate_chunk,
+    is_video_file,
+    resolve_options,
+    stream_generate,
+)
 from .model_runtime import get_runtime, init_runtime
 from .routes_history import router as history_router
 from .runtime_settings import (
@@ -94,6 +102,24 @@ app = FastAPI(title="Qwen3-VL UI backend", lifespan=lifespan)
 app.include_router(history_router)
 
 
+# Exit code run.py's supervisor treats as "GPU fault - restart me". Not 3: uvicorn
+# already uses that for a startup failure (e.g. port in use), which must not restart.
+GPU_FAULT_EXIT_CODE = 75
+
+
+def _restart_if_faulted() -> None:
+    """After an unrecoverable CUDA error, exit so the supervisor starts a fresh process.
+
+    Called once a response has been fully written. The short delay lets the final SSE
+    bytes reach the browser before the process goes away. An OOM never gets here - it
+    is recovered in-process (see inference.generate_chunk).
+    """
+    if get_runtime().faulted:
+        print("[recovery] CUDA context is unusable - exiting so the supervisor restarts the "
+              "server", flush=True)
+        asyncio.get_running_loop().call_later(1.0, os._exit, GPU_FAULT_EXIT_CODE)
+
+
 def _upload_path(file_id: str) -> str:
     matches = list(settings.upload_dir.glob(f"{file_id}.*"))
     if not matches:
@@ -105,7 +131,7 @@ def _upload_path(file_id: str) -> str:
 async def health() -> HealthResponse:
     rt = get_runtime()
     return HealthResponse(
-        status="ok",
+        status="faulted" if rt.faulted else "ok",
         model=settings.checkpoint_path,
         device=rt.device_str,
         backend=rt.backend,
@@ -249,6 +275,7 @@ async def chat(req: ChatRequest):
                 prev = full_text
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'done': True})}\n\n"
+        _restart_if_faulted()
 
     return StreamingResponse(
         event_stream(),
@@ -286,6 +313,11 @@ ANSWER_STYLE_INSTRUCTIONS = {
         "what you observe in this part of the video and why."
     ),
 }
+
+# Fixed per-chunk sampling seed: the same chunk with the same inputs always gets the
+# same answer, so an OOM retry at the same budget reproduces it exactly (and re-asking
+# a question is repeatable).
+CHUNK_SEED_BASE = 20250101
 
 
 @app.post("/api/chat/segmented")
@@ -347,12 +379,18 @@ async def chat_segmented(req: SegmentedChatRequest):
     n_segments = len(segments)
 
     style_instruction = ANSWER_STYLE_INSTRUCTIONS.get(req.answer_style)
+    # Concise answers are one word / number per chunk: cap generation to match, and
+    # join them into a whole-video timeline (see app/timeline.py).
+    concise = req.answer_style == "concise"
+    if concise:
+        opts = replace(opts, max_new_tokens=min(opts.max_new_tokens, CONCISE_MAX_NEW_TOKENS))
 
     print(
         f"[segmented] {req.video_id[:8]} {_fmt_ts(duration)} -> {n_segments} x "
         f"{_fmt_ts(seg_len)} chunk(s), lead={lead:.2f}s, answer_style={req.answer_style}, "
         f"optimise({optimize_video_params(seg_len, opts.sample_fps)}) "
-        f"max_new_tokens={opts.max_new_tokens}",
+        f"max_new_tokens={opts.max_new_tokens} max_video_tokens={opts.max_video_tokens} "
+        f"motion_threshold={opts.motion_threshold}",
         flush=True,
     )
 
@@ -369,6 +407,8 @@ async def chat_segmented(req: SegmentedChatRequest):
         )
         chunk_records: list = []
         run_status = "ok"
+        faulted = False
+        timeline = Timeline()
         t0 = time.monotonic()
         try:
             async with _gen_lock:
@@ -400,30 +440,83 @@ async def chat_segmented(req: SegmentedChatRequest):
                     }]
                     window = {"start": seg["start"], "end": seg["end"], "lead": seg["lead"]}
                     stats: dict = {}
-                    sync_gen = stream_generate(
-                        rt, messages, opts, on_stats=stats.update, window=window
-                    )
                     prev = ""
-                    sent_stats = False
-                    async for full_text in iterate_in_threadpool(sync_gen):
-                        if not sent_stats and stats:
-                            sent_stats = True
+                    skipped = False
+                    retries = 0
+                    # The first chunk is never skipped: there is nothing earlier whose
+                    # answer a quiet stretch would be continuing.
+                    threshold = opts.motion_threshold if idx > 0 else 0.0
+                    sync_gen = generate_chunk(
+                        rt, messages, opts, window,
+                        seed=CHUNK_SEED_BASE + idx, motion_threshold=threshold,
+                    )
+                    async for kind, payload in iterate_in_threadpool(sync_gen):
+                        if kind == "stats":
+                            stats = payload
                             yield _sse({"segment_stats": {"index": idx, "stats": stats}})
-                        if full_text.startswith(prev):
-                            payload = {"segment_delta": {"index": idx, "delta": full_text[len(prev):]}}
-                        else:
-                            payload = {"segment_replace": {"index": idx, "text": full_text}}
-                        prev = full_text
-                        yield _sse(payload)
+                        elif kind == "text":
+                            if payload.startswith(prev):
+                                out = {"segment_delta": {"index": idx, "delta": payload[len(prev):]}}
+                            else:
+                                out = {"segment_replace": {"index": idx, "text": payload}}
+                            prev = payload
+                            yield _sse(out)
+                        elif kind == "retry":
+                            # The failed attempt's partial text is discarded; the retry
+                            # streams its answer from scratch.
+                            retries += 1
+                            prev = ""
+                            yield _sse({"segment_retry": {"index": idx, **payload}})
+                            yield _sse({"segment_replace": {"index": idx, "text": ""}})
+                        elif kind == "skipped":
+                            skipped = True
+                            stats = payload
+                            prev = (
+                                f"_No significant motion ({stats['motion']:.1f}% of the picture "
+                                f"changed, below the {stats['motion_threshold']:g}% threshold) - "
+                                f"skipped, the model was not run on this chunk._"
+                            )
+                            yield _sse({"segment_stats": {"index": idx, "stats": stats}})
+                            yield _sse({"segment_replace": {"index": idx, "text": prev}})
+                        elif kind == "fault":
+                            faulted = True
 
                     if "**[" in prev:
                         run_status = "error"
-                    chunk_records.append(
-                        {"index": idx, "start": seg["start"], "end": seg["end"],
-                         "text": prev, "stats": stats}
-                    )
+                    record = {"index": idx, "start": seg["start"], "end": seg["end"],
+                              "text": prev, "stats": stats}
+                    if skipped:
+                        record["skipped"] = True
+                    if retries:
+                        record["retries"] = retries
+                    if concise:
+                        answer = timeline.add(
+                            idx, seg["start"], seg["end"],
+                            None if skipped else normalize_answer(prev), skipped=skipped,
+                        )
+                        if skipped and answer is not None:
+                            prev = (
+                                f"**{answer}** _(carried over - no motion: {stats['motion']:.1f}% "
+                                f"of the picture changed, below the {stats['motion_threshold']:g}% "
+                                f"threshold, so the model was not run on this chunk)_"
+                            )
+                            yield _sse({"segment_replace": {"index": idx, "text": prev}})
+                        record["answer"] = answer
+                        yield _sse({"timeline": {"spans": timeline.as_list()}})
+                    chunk_records.append(record)
                     yield _sse({"segment_done": {"index": idx, "text": prev, "stats": stats}})
-                    print(f"[segmented] chunk {idx + 1}/{n_segments} done ({len(prev)} chars)", flush=True)
+                    if not skipped:
+                        # Hand this chunk's cached blocks back between chunks: every chunk
+                        # has a slightly different shape, and over a long run the cache
+                        # fragments until it no longer fits beside the model.
+                        await asyncio.to_thread(rt.gc)
+                    note = " skipped (no motion)" if skipped else (f" after {retries} retr{'y' if retries == 1 else 'ies'}" if retries else "")
+                    print(f"[segmented] chunk {idx + 1}/{n_segments} done ({len(prev)} chars){note}", flush=True)
+                    if faulted:
+                        # Every later CUDA call would fail too - stop here; the process
+                        # restarts once this response is flushed.
+                        yield _sse({"fault": True})
+                        break
 
                 yield _sse({"done": True})
         finally:
@@ -441,8 +534,12 @@ async def chat_segmented(req: SegmentedChatRequest):
                 "max_new_tokens": opts.max_new_tokens,
                 "sample_fps": opts.sample_fps,
                 "answer_style": req.answer_style,
+                "max_video_tokens": opts.max_video_tokens,
+                "motion_threshold": opts.motion_threshold,
                 "sampling": {"fps": fps, "max_frames": max_frames, "max_side": max_side},
             }
+            if concise:
+                settings_snapshot["timeline"] = timeline.as_list()
             await asyncio.to_thread(
                 history.finalize_record,
                 record_id, created_at, video_name, duration, video_path,
@@ -450,6 +547,7 @@ async def chat_segmented(req: SegmentedChatRequest):
                 time.monotonic() - t0, run_status if chunk_records else "error",
                 req.video_id,
             )
+            _restart_if_faulted()
 
     return StreamingResponse(
         event_stream(),

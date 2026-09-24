@@ -368,6 +368,48 @@ function renderSegBody(i) {
   if (body) body.innerHTML = renderMarkdown(segRun.text[i] || "");
 }
 
+function renderSegStats(i, stats) {
+  const card = segRun.cards[i];
+  if (!card) return;
+  let el = card.querySelector(".seg-stats");
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "seg-stats";
+    card.appendChild(el);
+  }
+  const bits = [];
+  if (stats.frames?.length) bits.push(`${stats.frames.join(" + ")} frames`);
+  if (stats.frame_size) bits.push(`${stats.frame_size[0]}×${stats.frame_size[1]}`);
+  if (stats.prompt_tokens && !stats.skipped) bits.push(`${stats.prompt_tokens.toLocaleString()} prompt tokens`);
+  if (stats.motion != null) bits.push(`motion ${stats.motion.toFixed(1)}%`);
+  if (stats.recovery) {
+    const r = stats.recovery;
+    bits.push(r.max_video_tokens < r.requested
+      ? `recovered from low GPU memory at reduced detail (${r.max_video_tokens} of ${r.requested} video tokens)`
+      : `recovered from low GPU memory — same settings, same result`);
+  }
+  el.textContent = bits.join(" · ");
+}
+
+/** Concise answers joined across chunks: "Yes 4:30–9:30", one row per change. */
+function renderTimeline(spans) {
+  let el = segRun.container.querySelector(".seg-timeline");
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "seg-timeline";
+    segRun.container.prepend(el);
+  }
+  const rows = spans.map((s) =>
+    `<li><span class="tl-range">${fmtTs(s.start)}–${fmtTs(s.end)}</span>` +
+    `<span class="tl-answer">${escapeHtml(s.answer)}</span>` +
+    `<span class="tl-count">${s.chunks} chunk${s.chunks === 1 ? "" : "s"}` +
+    (s.carried ? ` · ${s.carried} carried over (no motion)` : "") + `</span></li>`
+  ).join("");
+  const changes = Math.max(0, spans.length - 1);
+  el.innerHTML = `<div class="tl-title">Timeline <span>${changes} change${changes === 1 ? "" : "s"}</span></div>` +
+    (rows ? `<ul>${rows}</ul>` : `<div class="seg-note">No answers yet.</div>`);
+}
+
 function setSegState(i, label, cls) {
   const el = segRun.cards[i]?.querySelector(".seg-state");
   if (!el) return;
@@ -396,6 +438,7 @@ async function runSegmented(prompt) {
     count: 0,
     cards: [],
     text: [],
+    skipped: new Set(),
     done: new Set(),
     playingIdx: -1,
     waitingFor: null,
@@ -467,19 +510,25 @@ function handleSegEvent(evt) {
 
   if (evt.segment_stats) {
     const { index, stats } = evt.segment_stats;
-    const card = segRun.cards[index];
-    if (card && !card.querySelector(".seg-stats")) {
-      const bits = [];
-      if (stats.frames?.length) bits.push(`${stats.frames.join(" + ")} frames`);
-      if (stats.frame_size) bits.push(`${stats.frame_size[0]}×${stats.frame_size[1]}`);
-      if (stats.prompt_tokens) bits.push(`${stats.prompt_tokens.toLocaleString()} prompt tokens`);
-      if (bits.length) {
-        const el = document.createElement("div");
-        el.className = "seg-stats";
-        el.textContent = bits.join(" · ");
-        card.appendChild(el);
-      }
-    }
+    // Re-sent when an OOM retry changes what the model sees, so always overwrite.
+    if (stats.skipped) segRun.skipped.add(index);
+    renderSegStats(index, stats);
+    return;
+  }
+
+  if (evt.segment_retry) {
+    const { index, attempt, max_video_tokens } = evt.segment_retry;
+    setSegState(index, `low GPU memory — retry ${attempt - 1} (${max_video_tokens} tokens)…`, "run");
+    return;
+  }
+
+  if (evt.timeline) {
+    renderTimeline(evt.timeline.spans);
+    return;
+  }
+
+  if (evt.fault) {
+    showBadge("GPU error — the server is restarting itself, try again in ~30 s", true);
     return;
   }
 
@@ -500,7 +549,8 @@ function handleSegEvent(evt) {
     renderSegBody(i);
     segRun.done.add(i);
     const errored = /\*\*\[/.test(segRun.text[i] || "");
-    setSegState(i, errored ? "error" : "done", errored ? "err" : "ok");
+    if (segRun.skipped.has(i)) setSegState(i, "skipped · no motion", "skip");
+    else setSegState(i, errored ? "error" : "done", errored ? "err" : "ok");
     // Keep it open only if it is the chunk on screen; otherwise fold it away.
     if (segRun.cards[i] && i !== segRun.playingIdx && !errored) segRun.cards[i].open = false;
     // Playback was holding for this chunk's answer — let it go.

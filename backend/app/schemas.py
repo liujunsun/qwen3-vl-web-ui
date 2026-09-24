@@ -59,6 +59,7 @@ class SegmentedChatRequest(BaseModel):
     # Layers an extra instruction onto the prompt so the answer's shape matches the
     # question: "concise" for yes/no/counting questions, "detailed" for descriptive or
     # reasoning ones. "auto" (default) adds no instruction - the model's own judgement.
+    # "concise" answers are also joined into a whole-video timeline (app/timeline.py).
     answer_style: Literal["auto", "concise", "detailed"] = "auto"
 
 
@@ -101,3 +102,5 @@ class SettingsUpdate(BaseModel):
     segment_seconds: Optional[int] = Field(None, ge=10, le=7200)
     segment_overlap_frames: Optional[int] = Field(None, ge=0, le=240)
     sample_fps: Optional[float] = Field(None, ge=0.1, le=10.0)
+    max_video_tokens: Optional[int] = Field(None, ge=256, le=16384)
+    motion_threshold: Optional[float] = Field(None, ge=0.0, le=20.0)

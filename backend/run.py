@@ -10,7 +10,60 @@
 #   python run.py --flash-attn2 --port 8080
 import argparse
 import os
+import subprocess
+import sys
+import time
 from argparse import ArgumentParser
+
+# Supervisor policy: restart a crashed server, but give up if it keeps dying (a broken
+# install or a GPU that is truly gone would otherwise restart forever).
+SUPERVISOR_ENV = "QWEN_SUPERVISED_CHILD"
+RESTART_DELAY_S = 3
+MAX_RESTARTS = 5
+RESTART_WINDOW_S = 600
+GPU_FAULT_EXIT_CODE = 75  # app.main.GPU_FAULT_EXIT_CODE
+UVICORN_STARTUP_FAILURE = 3  # config problem (port in use...) - restarting won't help
+
+
+def supervise() -> int:
+    """Run the server as a child process and restart it whenever it dies.
+
+    Out-of-memory errors never reach this - they are recovered inside the server
+    without losing the model. This covers what can't be fixed in-process: a CUDA fault
+    that poisons the context (the server exits with GPU_FAULT_EXIT_CODE on purpose),
+    a driver reset, or a hard crash. A restart reloads the model (~15s) and re-runs the
+    preflight, which frees VRAM held by anything stale.
+    """
+    cmd = [sys.executable, os.path.abspath(__file__), *sys.argv[1:]]
+    env = {**os.environ, SUPERVISOR_ENV: "1"}
+    restarts: list = []
+    while True:
+        child = subprocess.Popen(cmd, env=env)
+        try:
+            code = child.wait()
+        except KeyboardInterrupt:
+            # Ctrl+C reaches the child too (same console); let it shut down cleanly.
+            try:
+                child.wait(timeout=30)
+            except (KeyboardInterrupt, subprocess.TimeoutExpired):
+                child.kill()
+            return 0
+        if code == 0:
+            return 0
+        if code == UVICORN_STARTUP_FAILURE:
+            print("[supervisor] server failed to start (is another run.py already using the "
+                  "port?) - not restarting.", flush=True)
+            return code
+        now = time.time()
+        restarts = [t for t in restarts if now - t < RESTART_WINDOW_S] + [now]
+        reason = "GPU fault" if code == GPU_FAULT_EXIT_CODE else f"exit code {code}"
+        if len(restarts) > MAX_RESTARTS:
+            print(f"[supervisor] server died ({reason}) {len(restarts)} times in "
+                  f"{RESTART_WINDOW_S // 60} min - giving up.", flush=True)
+            return code
+        print(f"[supervisor] server died ({reason}); restarting in {RESTART_DELAY_S}s "
+              f"({len(restarts)}/{MAX_RESTARTS})...", flush=True)
+        time.sleep(RESTART_DELAY_S)
 
 
 def main() -> None:
@@ -47,6 +100,12 @@ def main() -> None:
     parser.add_argument("--sample-fps", type=float, default=4.0,
                         help="Frames sampled per second of video, per chunk - the same rate for "
                              "every chunk in a run (default: %(default)s)")
+    parser.add_argument("--max-video-tokens", type=int, default=4096,
+                        help="Visual tokens per chunk - frames are downscaled to fit. The main "
+                             "VRAM knob; lower it if you run out of GPU memory (default: %(default)s)")
+    parser.add_argument("--motion-threshold", type=float, default=1.0,
+                        help="Skip chunks where less than this %% of the picture changes "
+                             "(0 = off, default: %(default)s)")
     parser.add_argument("--history-retention-days", type=int, default=30,
                         help="Every segmented-analysis run is logged permanently for the analytics "
                              "dashboard; the archived video copy is deleted after this many days to "
@@ -54,7 +113,14 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--reload", action="store_true", help="Dev auto-reload (reloads the model too).")
+    parser.add_argument("--supervise", action=argparse.BooleanOptionalAction, default=True,
+                        help="Restart the server automatically if it crashes or hits an "
+                             "unrecoverable GPU error (default: on). --no-supervise to disable.")
     args = parser.parse_args()
+
+    # --reload already runs the app in a reloader subprocess; don't stack a supervisor on it.
+    if args.supervise and not args.reload and os.environ.get(SUPERVISOR_ENV) != "1":
+        sys.exit(supervise())
 
     os.environ["QWEN_CHECKPOINT"] = args.checkpoint_path
     os.environ["QWEN_DEVICE"] = args.device
@@ -63,6 +129,8 @@ def main() -> None:
     os.environ["QWEN_SEGMENT_SECONDS"] = str(args.segment_seconds)
     os.environ["QWEN_SEGMENT_OVERLAP_FRAMES"] = str(args.segment_overlap_frames)
     os.environ["QWEN_SAMPLE_FPS"] = str(args.sample_fps)
+    os.environ["QWEN_MAX_VIDEO_TOKENS"] = str(args.max_video_tokens)
+    os.environ["QWEN_MOTION_THRESHOLD"] = str(args.motion_threshold)
     os.environ["QWEN_HISTORY_RETENTION_DAYS"] = str(args.history_retention_days)
     os.environ["QWEN_HOST"] = args.host
     os.environ["QWEN_PORT"] = str(args.port)

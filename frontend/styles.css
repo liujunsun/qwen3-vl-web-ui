@@ -622,6 +622,23 @@ details.seg-card[open] > summary::before { transform: rotate(90deg); }
 .seg-body p:last-child { margin-bottom: 0; }
 .seg-stats { font-size: 11px; color: var(--muted); margin: 5px 12px 10px; }
 .seg-error { color: var(--danger); font-size: 13px; }
+.seg-state.skip { color: var(--muted); }
+.seg-note { color: var(--muted); font-size: 13px; }
+.seg-body .seg-note { margin-top: 6px; }
+.tl-answer {
+  display: inline-block; font-size: 12px; font-weight: 650;
+  padding: 1px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-strong);
+}
+.seg-timeline {
+  border: 1px solid var(--border); border-radius: 10px; background: var(--surface);
+  padding: 10px 12px; font-size: 13px;
+}
+.seg-timeline .tl-title { font-weight: 650; margin-bottom: 6px; }
+.seg-timeline .tl-title span { font-weight: 400; color: var(--muted); margin-left: 6px; }
+.seg-timeline ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+.seg-timeline li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.seg-timeline .tl-range { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 84px; }
+.seg-timeline .tl-count { font-size: 11px; color: var(--muted); }
 
 /* --- analytics dashboard ---------------------------------------------------- */
 .analytics-main { max-width: min(1040px, 94vw); margin: 0 auto; width: 100%; }

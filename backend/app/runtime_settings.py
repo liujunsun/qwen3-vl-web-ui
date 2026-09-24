@@ -56,6 +56,22 @@ FIELD_SPEC: Dict[str, Dict[str, Any]] = {
                 "in a run, including a shorter final chunk. Frame cap and frame size are still "
                 "derived automatically from this rate and each chunk's length.",
     },
+    "max_video_tokens": {
+        "kind": "int", "min": 256, "max": 16384, "step": 256,
+        "label": "Max video tokens per chunk",
+        "help": "The main VRAM knob. Each chunk's frames are downscaled to fit this many "
+                "visual tokens - lowering fps alone does not save memory, it only makes "
+                "each frame larger. ~4096 suits a 12 GB GPU with the 2B model; raise it for "
+                "more detail if you have headroom.",
+    },
+    "motion_threshold": {
+        "kind": "float", "min": 0.0, "max": 20.0, "step": 0.1,
+        "label": "Motion skip threshold (% changed)",
+        "help": "Chunks where less than this % of the picture changes are skipped without "
+                "running the model - saves GPU time on idle footage. On a fixed camera, idle "
+                "chunks measure ~0.3-0.9% and real activity 1.5%+. The first chunk is never "
+                "skipped. 0 = off.",
+    },
 }
 
 
@@ -67,6 +83,8 @@ class GenerationDefaults:
     segment_seconds: int = 60
     segment_overlap_frames: int = 4
     sample_fps: float = 4.0
+    max_video_tokens: int = 4096
+    motion_threshold: float = 1.0
 
     def as_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -102,6 +120,8 @@ class _Store:
             segment_seconds=settings.segment_seconds,
             segment_overlap_frames=settings.segment_overlap_frames,
             sample_fps=settings.sample_fps,
+            max_video_tokens=settings.max_video_tokens,
+            motion_threshold=settings.motion_threshold,
         )
 
         with self._lock:

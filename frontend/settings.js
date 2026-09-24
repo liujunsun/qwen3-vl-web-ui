@@ -11,7 +11,9 @@ const saveBtn = $("#save-btn");
 const revertBtn = $("#revert-btn");
 const resetBtn = $("#reset-btn");
 
-const SEGMENT_FIELDS = ["segment_seconds", "segment_overlap_frames", "sample_fps"];
+const SEGMENT_FIELDS = [
+  "segment_seconds", "segment_overlap_frames", "sample_fps", "max_video_tokens", "motion_threshold",
+];
 
 let spec = null;        // full /api/settings payload
 let saved = {};         // values as the server currently has them

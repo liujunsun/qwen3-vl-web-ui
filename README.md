@@ -79,8 +79,11 @@ Wait for `[model] warmup done`, then open <http://127.0.0.1:8000>.
 | `--max-new-tokens` | `1024` | default generation length |
 | `--segment-seconds` | `60` | seconds of video per chunk — every video question is answered chunk-by-chunk, there is no whole-clip option |
 | `--segment-overlap-frames` | `4` | frames of the previous chunk carried into the next |
+| `--max-video-tokens` | `4096` | visual tokens per chunk; frames are downscaled to fit. The main VRAM knob — lowering fps alone does not save memory, it only makes each frame larger |
 | `--history-retention-days` | `30` | days an archived video is kept for the [analytics dashboard](#analytics-dashboard) before it's deleted (`0` = never archive video, metadata only); the run record itself is kept forever |
 | `--host` / `--port` | `127.0.0.1` / `8000` | bind address |
+| `--motion-threshold` | `1.0` | skip chunks where less than this % of the picture changes (`0` = off) |
+| `--supervise` / `--no-supervise` | on | restart the server automatically after a crash or unrecoverable GPU error |
 | `--reload` | off | dev auto-reload (also reloads the model) |
 
 Video frame rate, frame cap, and frame size are not flags — every chunk derives them
@@ -109,6 +112,18 @@ python run.py -c Qwen/Qwen3-VL-8B-Instruct --min-free-gb 20 --strict-vram
 
 The preflight only manages Ollama and our own cache; it lists other GPU processes
 (training jobs, browsers) but does not kill them.
+
+### GPU memory recovery
+
+Two failures are handled differently, because they need different fixes:
+
+| Failure | What happens | Effect on results |
+| --- | --- | --- |
+| **Out of memory** (context still healthy) | The failed attempt's tensors are released and the cache emptied, then the chunk is retried in-process: same token budget once, then ½, then ¼ (never below 512). No restart, the model stays loaded. | The same-budget retry reproduces the **identical** answer - every chunk samples with a fixed seed. Only a reduced-budget retry changes the result, and that chunk is labelled "reduced detail" in the UI and in its stats. |
+| **CUDA fault** (illegal memory access, device-side assert, driver reset) | The context is unusable, so the run stops at that chunk, the response is flushed, and the process exits with code 75. `run.py`'s supervisor restarts it (model reload ~15 s, preflight re-run). | Chunks finished before the fault are kept and logged; ask again once the badge is back. |
+
+The supervisor gives up after 5 restarts in 10 minutes, and never restarts a startup
+failure such as the port already being in use.
 
 ## API
 
@@ -229,6 +244,28 @@ each chunk reports it separately rather than the run producing one merged count.
 
 The whole run holds the single generation lock, so ordinary `/api/chat` requests wait
 until it finishes.
+
+### Motion skip
+
+Before a chunk is sent to the model, `video.motion_score` measures what % of the
+picture changes between its sampled frames. Below **Motion skip threshold** (default
+1%) the chunk is marked "skipped · no motion" and the model is not run - on a fixed
+camera, idle chunks measured 0.3-0.9% and anything with people or vehicles moving
+1.5%+. The first chunk is never skipped. Set the threshold to 0 to analyse every chunk.
+
+### Concise timeline
+
+With **Concise**, each chunk answers with a single word or number (generation capped at
+32 tokens), and the server joins identical answers in back-to-back chunks into spans
+(`app/timeline.py`), streamed as a **Timeline** above the chunk cards and saved with the
+run - e.g. *No 0:00-0:15 · Yes 0:15-1:30 · No 1:30-1:45* for "is a van in the loading
+bay?". That turns 60 separate chunk answers into when something was true, for how long,
+and how often it changed. It is plain code - the model never sees another chunk's output.
+
+A chunk skipped by motion skip **carries over** the previous answer (nothing in the
+picture changed, so neither did the answer) and is counted separately in the span. A
+chunk with no usable answer - an error, or a reply longer than a few words - ends the
+span.
 
 ## Analytics dashboard
 
