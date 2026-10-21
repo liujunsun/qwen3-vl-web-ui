@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Live View · Qwen3-VL · SP</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="title">
+      <span class="brand-mark" aria-hidden="true">SP</span>
+      <div class="brand-lines">
+        <h1>Live View</h1>
+        <span class="brand-sub">Singapore Polytechnic · Qwen3-VL</span>
+      </div>
+      <span id="badge" class="badge" title="backend status">connecting…</span>
+    </div>
+    <div class="header-actions">
+      <button id="camera-btn" class="ghost" aria-pressed="false">📷 Start camera</button>
+      <a class="btn-link ghost" href="batch.html" title="Run one question across many videos">🗂 Batch</a>
+      <a class="btn-link ghost" href="analytics.html" title="Usage history &amp; stats">📊 Analytics</a>
+      <a class="btn-link ghost" href="settings.html" title="Generation defaults">⚙ Settings</a>
+      <a class="btn-link ghost" href="index.html">← Back to chat</a>
+    </div>
+  </header>
+
+  <div class="workspace">
+    <!-- Camera preview: a live MediaStream, not a staged file - no scrubbing, no name -->
+    <section id="stage" hidden>
+      <div class="stage-video-wrap">
+        <video id="player" playsinline preload="auto"></video>
+        <div id="stage-badge" class="stage-badge" hidden><span class="dot"></span><span id="stage-badge-text"></span></div>
+      </div>
+    </section>
+
+    <div class="chat-col">
+      <main id="transcript" class="transcript">
+        <div class="empty-hint">
+          Start the camera above, type a standing question, and Send to begin
+          continuous live analysis — one rolling clip after another, exactly
+          "Chunk length" seconds each, until you stop it.
+        </div>
+      </main>
+
+      <form id="composer" class="composer">
+        <!-- Only meaningful once the camera is on; hidden otherwise -->
+        <div id="answer-style-row" class="answer-style-row" hidden>
+          <span class="answer-style-label">Answer style</span>
+          <div class="answer-style-toggle" role="radiogroup" aria-label="Answer style">
+            <button type="button" class="as-btn" data-style="auto" aria-pressed="true"
+                    title="No extra instruction — the model judges the answer's length itself">Auto</button>
+            <button type="button" class="as-btn" data-style="concise" aria-pressed="false"
+                    title="For yes/no or counting questions — bare 'Yes'/'No' or a number">Concise</button>
+            <button type="button" class="as-btn" data-style="detailed" aria-pressed="false"
+                    title="For descriptive or reasoning questions — a short explanation">Detailed</button>
+          </div>
+        </div>
+
+        <div class="composer-row">
+          <textarea id="input" rows="1" placeholder="Start the camera first…" disabled></textarea>
+          <button id="send-btn" type="submit" disabled>Send</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="markdown.js"></script>
+  <script src="live.js"></script>
+</body>
+</html>

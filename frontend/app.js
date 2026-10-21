@@ -34,14 +34,18 @@ const stageSizeEl = $("#stage-size");
 const stageRestartEl = $("#stage-restart");
 const stageAutoEl = $("#stage-auto");
 /** server-side chunking config, refreshed from /api/settings */
-let segCfg = { seconds: 60, fps: 4 };
+let segCfg = { seconds: 30, fps: 1 };
+// Whether segCfg has ever been confirmed from the server - until then its values are
+// just a guess, and a guess that's gone stale (as these literals already have once)
+// would silently show the wrong sampling preview instead of none at all.
+let segCfgLoaded = false;
 
 // answer style: layers an extra instruction onto the prompt so the answer's shape
 // matches the question ("concise" for yes/no/counting, "detailed" for descriptive /
 // reasoning). Only meaningful for a staged video (segmented analysis); the row that
 // shows these buttons is hidden otherwise. Remembered across visits.
 const answerStyleRowEl = $("#answer-style-row");
-const answerStyleBtns = document.querySelectorAll(".as-btn");
+const answerStyleBtns = document.querySelectorAll("#answer-style-row .as-btn");
 let answerStyle = "auto";
 try {
   const saved = localStorage.getItem("qwen.answerStyle");
@@ -68,7 +72,7 @@ function optimizeVideoParams(seconds, fixedFps) {
 /** Show, in the stage bar, what sampling each chunk of the loaded clip will get. */
 function updateStageAuto() {
   const m = stageVideoId ? mediaById.get(stageVideoId) : null;
-  if (!m || !(m.duration > 0)) { stageAutoEl.hidden = true; return; }
+  if (!m || !(m.duration > 0) || !segCfgLoaded) { stageAutoEl.hidden = true; return; }
   const o = optimizeVideoParams(segCfg.seconds, segCfg.fps);
   stageAutoEl.textContent =
     `per ${fmtTs(segCfg.seconds)} chunk → ${o.fps} fps · ≤${o.maxFrames} frames · ` +
@@ -108,8 +112,9 @@ async function refreshSettings() {
     const r = await fetch("/api/settings");
     if (!r.ok) return;
     const d = (await r.json()).defaults || {};
-    segCfg.seconds = Number(d.segment_seconds) || 60;
-    segCfg.fps = Number(d.sample_fps) || 4;
+    segCfg.seconds = Number(d.segment_seconds) || segCfg.seconds;
+    segCfg.fps = Number(d.sample_fps) || segCfg.fps;
+    segCfgLoaded = true;
   } catch {
     /* leave the last known config in place */
   }
@@ -344,7 +349,9 @@ async function runGeneration() {
 }
 
 // ---------------------------------------------------------------------------
-// Segmented ("live view") analysis - every video question goes through this path.
+// Segmented analysis (Single Processing) - every staged-file video question goes
+// through this path. Not to be confused with live.html's Live View (webcam) - that's
+// a different input entirely, see its own file.
 //
 // One question is answered chunk-by-chunk over a long video. The backend streams a
 // result per chunk as soon as it is ready; the player walks the clip in real time
@@ -443,6 +450,7 @@ async function runSegmented(prompt) {
     playingIdx: -1,
     waitingFor: null,
     finished: false,
+    faulted: false,
     container,
   };
 
@@ -528,6 +536,10 @@ function handleSegEvent(evt) {
   }
 
   if (evt.fault) {
+    // The backend always sends {done:true} right after {fault:true} to end the stream
+    // cleanly - without this flag the "Analysis complete" badge below would instantly
+    // overwrite this one, hiding the fact that the run was cut short.
+    segRun.faulted = true;
     showBadge("GPU error — the server is restarting itself, try again in ~30 s", true);
     return;
   }
@@ -563,6 +575,7 @@ function handleSegEvent(evt) {
   }
 
   if (evt.done) {
+    if (segRun.faulted) return; // keep the GPU-error badge up instead of masking it
     showBadge(segRun.count > 1 ? "Analysis complete — scrub to review" : "Analysis complete", true);
   }
 }

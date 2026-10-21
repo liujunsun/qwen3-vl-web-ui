@@ -94,6 +94,52 @@ def optimize_video_params(seconds: float, fixed_fps: Optional[float] = None) -> 
     return fps, max_frames, side
 
 
+def needs_browser_transcode(path: str) -> bool:
+    """True if `path`'s video codec isn't one browsers reliably decode (H.264/VP9/AV1).
+
+    Catches HEVC in particular: common for NVR/CCTV exports, and undecodable by
+    Chrome/Firefox on most desktops without a paid hardware license - the resulting
+    <video> loads its container metadata fine (duration, seek bar) but never paints a
+    frame.
+    """
+    with av.open(path) as container:
+        codec = container.streams.video[0].codec_context.name
+    return codec not in ("h264", "vp9", "av1")
+
+
+def transcode_to_h264(src: str, dest: str) -> None:
+    """Re-encode `src`'s video stream to H.264/yuv420p at `dest` (mp4 container), so it
+    plays in every browser. Any audio stream is copied through as-is (no re-encode).
+    """
+    with av.open(src) as in_c, av.open(dest, mode="w") as out_c:
+        in_v = in_c.streams.video[0]
+        width, height = in_v.codec_context.width, in_v.codec_context.height
+        # libx264 needs even dimensions for yuv420p's 2x2 chroma subsampling.
+        width, height = (width // 2) * 2, (height // 2) * 2
+
+        out_v = out_c.add_stream("libx264", rate=in_v.average_rate or 30)
+        out_v.width, out_v.height = width, height
+        out_v.pix_fmt = "yuv420p"
+        out_v.options = {"crf": "23", "preset": "veryfast"}
+
+        in_a = in_c.streams.audio[0] if in_c.streams.audio else None
+        out_a = out_c.add_stream(template=in_a) if in_a is not None else None
+
+        for packet in in_c.demux(*([in_v, in_a] if in_a is not None else [in_v])):
+            if packet.dts is None:
+                continue
+            if packet.stream.type == "video":
+                for frame in packet.decode():
+                    for out_packet in out_v.encode(frame):
+                        out_c.mux(out_packet)
+            elif out_a is not None:
+                packet.stream = out_a
+                out_c.mux(packet)
+
+        for out_packet in out_v.encode():  # flush any buffered frames
+            out_c.mux(out_packet)
+
+
 def probe_video(path: str) -> dict:
     """Cheap header read: duration / fps / geometry, without decoding any frames.
 

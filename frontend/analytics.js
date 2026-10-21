@@ -7,9 +7,26 @@ const $ = (sel) => document.querySelector(sel);
 
 const badgeEl = $("#badge");
 
-const filters = { q: "", from: null, to: null };
+const filters = { q: "", from: null, to: null, batch: null };
 const page = { limit: 20, offset: 0, total: 0 };
 let lastStats = null;
+let detailId = null;
+// Bumped on every openDetail() call, so a slower in-flight fetch from an earlier click
+// can tell it's been superseded and discard its own result instead of overwriting a
+// newer click's modal content.
+let detailRequestSeq = 0;
+
+// The last `/api/history` page as returned (a mix of flat runs and batch-group
+// entries - see history.list_records_grouped on the backend) so a batch's expand/
+// collapse toggle can re-render the table without a round trip, and `navList` (every
+// individual run in this page's display order, batch members flattened in) so the
+// detail modal's Prev/Next can step across runs for fast manual review.
+let lastItems = [];
+let navList = [];
+let navIndex = -1;
+// Which batches are expanded, by batch_label - survives re-renders (delete, filter
+// re-apply) within this page load so toggling one open doesn't get silently undone.
+const expandedBatches = new Set();
 
 // ---------------------------------------------------------------------------
 // Health badge
@@ -29,6 +46,13 @@ async function refreshHealth() {
 // ---------------------------------------------------------------------------
 // Formatting helpers
 // ---------------------------------------------------------------------------
+function shortModel(checkpointPath) {
+  // Runs logged before this field existed (or a mid-stream server crash) have no
+  // checkpoint on record - say so rather than showing a blank cell.
+  if (!checkpointPath) return "—";
+  return String(checkpointPath).split("/").pop();
+}
+
 function fmtDuration(seconds) {
   seconds = Math.max(0, Math.round(Number(seconds) || 0));
   const h = Math.floor(seconds / 3600);
@@ -568,14 +592,138 @@ window.addEventListener("resize", debounce(() => { if (lastStats) renderCharts(l
 // ---------------------------------------------------------------------------
 // History table
 // ---------------------------------------------------------------------------
+/** Every individual run in `items`, in display order - batch-group entries expand
+ * into their `runs` (already server-sorted oldest-first). Drives the detail modal's
+ * Prev/Next regardless of which batches are actually expanded in the table right now,
+ * so stepping through logs for review always walks every run, not just visible rows. */
+function flattenNav(items) {
+  const list = [];
+  for (const item of items) {
+    if (item.is_batch) list.push(...item.runs);
+    else list.push(item);
+  }
+  return list;
+}
+
+function addCell(tr, text, cls) {
+  const td = document.createElement("td");
+  td.textContent = text;
+  if (cls) td.className = cls;
+  tr.appendChild(td);
+  return td;
+}
+
+function buildRunRow(item, nested) {
+  const tr = document.createElement("tr");
+  if (nested) tr.className = "history-row-nested";
+
+  addCell(tr, fmtDate(item.created_at));
+  addCell(tr, nested ? `↳ ${item.video_name}` : item.video_name);
+  addCell(tr, shortModel(item.checkpoint_path));
+  addCell(tr, fmtDuration(item.video_duration));
+  addCell(tr, item.prompt, "cell-prompt");
+  addCell(tr, String(item.chunk_count));
+  addCell(tr, fmtDuration(item.time_saved_seconds));
+
+  const statusTd = document.createElement("td");
+  const pill = document.createElement("span");
+  pill.className = `status-pill ${item.status === "ok" ? "ok" : "err"}`;
+  pill.textContent = item.status === "ok" ? "OK" : "Error";
+  statusTd.appendChild(pill);
+  tr.appendChild(statusTd);
+
+  const actionsTd = document.createElement("td");
+  actionsTd.className = "cell-actions";
+  const viewBtn = document.createElement("button");
+  viewBtn.type = "button";
+  viewBtn.className = "ghost sm";
+  viewBtn.textContent = "View";
+  viewBtn.addEventListener("click", () => openDetail(item.id));
+  const exportBtn = document.createElement("button");
+  exportBtn.type = "button";
+  exportBtn.className = "ghost sm";
+  exportBtn.textContent = "Export";
+  exportBtn.title = "Download this run's full prompt + per-chunk output as JSON";
+  exportBtn.addEventListener("click", () => {
+    window.location.href = `/api/history/${item.id}/export/json`;
+  });
+  const delBtn = document.createElement("button");
+  delBtn.type = "button";
+  delBtn.className = "ghost sm";
+  delBtn.textContent = "Delete";
+  delBtn.addEventListener("click", () => deleteRun(item.id));
+  actionsTd.append(viewBtn, exportBtn, delBtn);
+  tr.appendChild(actionsTd);
+
+  return tr;
+}
+
+function buildBatchRow(item) {
+  const tr = document.createElement("tr");
+  tr.className = "history-row-batch";
+  const expanded = expandedBatches.has(item.batch_label);
+
+  addCell(tr, fmtDate(item.created_at));
+
+  const videoTd = document.createElement("td");
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "batch-toggle";
+  toggle.textContent = expanded ? "▾" : "▸";
+  toggle.setAttribute("aria-label", expanded ? "Collapse batch" : "Expand batch");
+  toggle.addEventListener("click", () => {
+    if (expanded) expandedBatches.delete(item.batch_label);
+    else expandedBatches.add(item.batch_label);
+    renderTable(lastItems);
+  });
+  videoTd.append(
+    toggle,
+    document.createTextNode(` 🗂 ${item.batch_label} · ${item.run_count} video${item.run_count !== 1 ? "s" : ""}`)
+  );
+  tr.appendChild(videoTd);
+
+  addCell(tr, item.checkpoint_mixed ? "multiple" : shortModel(item.checkpoint_path));
+  addCell(tr, fmtDuration(item.video_duration));
+  addCell(tr, item.prompt, "cell-prompt");
+  addCell(tr, String(item.chunk_count));
+  addCell(tr, fmtDuration(item.time_saved_seconds));
+
+  const statusTd = document.createElement("td");
+  const pill = document.createElement("span");
+  pill.className = `status-pill ${item.error_count === 0 ? "ok" : "err"}`;
+  pill.textContent = item.error_count === 0 ? "OK" : `${item.error_count} error${item.error_count !== 1 ? "s" : ""}`;
+  statusTd.appendChild(pill);
+  tr.appendChild(statusTd);
+
+  const actionsTd = document.createElement("td");
+  actionsTd.className = "cell-actions";
+  const filterBtn = document.createElement("button");
+  filterBtn.type = "button";
+  filterBtn.className = "ghost sm";
+  filterBtn.textContent = "Filter";
+  filterBtn.title = "Show only this batch's runs (also narrows the charts & stats above)";
+  filterBtn.addEventListener("click", () => {
+    $("#f-batch").value = item.batch_label;
+    filters.batch = item.batch_label;
+    page.offset = 0;
+    loadAll();
+  });
+  actionsTd.appendChild(filterBtn);
+  tr.appendChild(actionsTd);
+
+  return tr;
+}
+
 function renderTable(items) {
+  lastItems = items;
+  navList = flattenNav(items);
   const tbody = $("#history-tbody");
   tbody.innerHTML = "";
 
   if (!items.length) {
     const tr = document.createElement("tr");
     const td = document.createElement("td");
-    td.colSpan = 8;
+    td.colSpan = 9;
     td.className = "table-empty";
     td.textContent = "No runs match your filters yet.";
     tr.appendChild(td);
@@ -584,44 +732,21 @@ function renderTable(items) {
   }
 
   for (const item of items) {
-    const tr = document.createElement("tr");
+    if (item.is_batch) {
+      tbody.appendChild(buildBatchRow(item));
+      if (expandedBatches.has(item.batch_label)) {
+        for (const run of item.runs) tbody.appendChild(buildRunRow(run, true));
+      }
+    } else {
+      tbody.appendChild(buildRunRow(item, false));
+    }
+  }
 
-    const addCell = (text, cls) => {
-      const td = document.createElement("td");
-      td.textContent = text;
-      if (cls) td.className = cls;
-      tr.appendChild(td);
-    };
-    addCell(fmtDate(item.created_at));
-    addCell(item.video_name);
-    addCell(fmtDuration(item.video_duration));
-    addCell(item.prompt, "cell-prompt");
-    addCell(String(item.chunk_count));
-    addCell(fmtDuration(item.time_saved_seconds));
-
-    const statusTd = document.createElement("td");
-    const pill = document.createElement("span");
-    pill.className = `status-pill ${item.status === "ok" ? "ok" : "err"}`;
-    pill.textContent = item.status === "ok" ? "OK" : "Error";
-    statusTd.appendChild(pill);
-    tr.appendChild(statusTd);
-
-    const actionsTd = document.createElement("td");
-    actionsTd.className = "cell-actions";
-    const viewBtn = document.createElement("button");
-    viewBtn.type = "button";
-    viewBtn.className = "ghost sm";
-    viewBtn.textContent = "View";
-    viewBtn.addEventListener("click", () => openDetail(item.id));
-    const delBtn = document.createElement("button");
-    delBtn.type = "button";
-    delBtn.className = "ghost sm";
-    delBtn.textContent = "Delete";
-    delBtn.addEventListener("click", () => deleteRun(item.id));
-    actionsTd.append(viewBtn, delBtn);
-    tr.appendChild(actionsTd);
-
-    tbody.appendChild(tr);
+  // The modal may already be open (e.g. a toggle re-render while reviewing) - keep its
+  // Prev/Next in sync with the row it's currently showing.
+  if (detailId) {
+    navIndex = navList.findIndex((r) => r.id === detailId);
+    updateNavButtons();
   }
 }
 
@@ -647,23 +772,39 @@ async function deleteRun(id) {
 // Detail modal
 // ---------------------------------------------------------------------------
 async function openDetail(id) {
+  const seq = ++detailRequestSeq;
   let rec;
   try {
     rec = await fetchJSON(`/api/history/${id}`);
   } catch (e) {
-    alert("Could not load run detail: " + e.message);
+    if (seq === detailRequestSeq) alert("Could not load run detail: " + e.message);
     return;
   }
+  if (seq !== detailRequestSeq) return; // a later "View" click has already superseded this one
 
+  detailId = id;
+  navIndex = navList.findIndex((r) => r.id === id);
+  updateNavButtons();
   $("#detail-title").textContent = rec.video_name;
   const body = $("#detail-body");
   body.innerHTML = "";
+  body.classList.add("detail-grid");
+
+  // Video + meta stay pinned on the left; the chunk list scrolls independently on
+  // the right, so a highlighted chunk far down the list (e.g. #40) is always visible
+  // beside the clip instead of requiring a scroll away from it.
+  const left = document.createElement("div");
+  left.className = "detail-left";
+  const right = document.createElement("div");
+  right.className = "detail-right";
+  body.append(left, right);
 
   const meta = document.createElement("div");
   meta.className = "detail-meta";
   const sampling = rec.settings.sampling || {};
   const metaLines = [
     ["Date", fmtDate(rec.created_at)],
+    ["Model", shortModel(rec.checkpoint_path)],
     ["Duration", fmtDuration(rec.video_duration)],
     ["Processing time", fmtDuration(rec.processing_seconds)],
     ["Time saved", fmtDuration(rec.time_saved_seconds)],
@@ -674,6 +815,12 @@ async function openDetail(id) {
     ["Sampling", `${sampling.fps} fps · ≤${sampling.max_frames} frames · ` +
       `${sampling.max_side ? sampling.max_side + "px" : "native"}`],
   ];
+  if (rec.batch_label) {
+    metaLines.push(["Batch", rec.batch_label]);
+  }
+  if (rec.settings.default_prompt) {
+    metaLines.push(["Default prompt in effect", rec.settings.default_prompt]);
+  }
   for (const [k, v] of metaLines) {
     const row = document.createElement("div");
     row.className = "detail-meta-row";
@@ -686,7 +833,7 @@ async function openDetail(id) {
     row.append(kEl, vEl);
     meta.appendChild(row);
   }
-  body.appendChild(meta);
+  left.appendChild(meta);
 
   const promptLabel = document.createElement("div");
   promptLabel.className = "detail-section-label";
@@ -694,12 +841,30 @@ async function openDetail(id) {
   const promptText = document.createElement("div");
   promptText.className = "detail-prompt";
   promptText.textContent = rec.prompt;
-  body.append(promptLabel, promptText);
+  left.append(promptLabel, promptText);
 
   // Chunk cards jump the player to their time span when a video is archived for this
   // run; `chunkEnd` tracks the boundary so playback auto-pauses at the chunk's end.
+  // `chunkCards`/`trackSegs` (keyed by chunk index) and `setActiveChunk` mirror the
+  // live "Single Processing" view's playing-chunk highlight (app.js's seg-card.playing)
+  // so scrubbing/playing the clip — or just hovering the track below it — outlines
+  // whichever chunk card that point in the video belongs to, for quick accuracy checks.
   let video = null;
   let chunkEnd = null;
+  let hoverIdx = -1;
+  const chunkCards = [];
+  const trackSegs = [];
+
+  let lastActiveIdx = -1;
+  function setActiveChunk(idx) {
+    chunkCards.forEach((card, i) => card?.classList.toggle("active", i === idx));
+    trackSegs.forEach((seg, i) => seg?.classList.toggle("active", i === idx));
+    if (idx !== -1 && idx !== lastActiveIdx) {
+      chunkCards[idx]?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+    lastActiveIdx = idx;
+  }
+
   if (rec.video_available) {
     video = document.createElement("video");
     video.controls = true;
@@ -710,19 +875,47 @@ async function openDetail(id) {
         video.pause();
         chunkEnd = null;
       }
+      // Hovering the track below takes priority over the live playback position.
+      if (hoverIdx === -1) {
+        const match = rec.chunks.find((c) => video.currentTime >= c.start && video.currentTime < c.end);
+        setActiveChunk(match ? match.index : -1);
+      }
     });
-    body.appendChild(video);
+    left.appendChild(video);
+
+    const track = document.createElement("div");
+    track.className = "detail-chunk-track";
+    for (const c of rec.chunks) {
+      const seg = document.createElement("div");
+      seg.className = "detail-chunk-track-seg";
+      seg.style.flex = `${Math.max(0.001, c.end - c.start)} 0 0`;
+      seg.title = `Chunk ${c.index + 1} · ${fmtTs(c.start)}–${fmtTs(c.end)}`;
+      seg.addEventListener("mouseenter", () => { hoverIdx = c.index; setActiveChunk(c.index); });
+      seg.addEventListener("click", () => {
+        chunkEnd = c.end;
+        video.currentTime = c.start;
+        video.play();
+      });
+      track.appendChild(seg);
+      trackSegs[c.index] = seg;
+    }
+    track.addEventListener("mouseleave", () => {
+      hoverIdx = -1;
+      const match = rec.chunks.find((c) => video.currentTime >= c.start && video.currentTime < c.end);
+      setActiveChunk(match ? match.index : -1);
+    });
+    left.appendChild(track);
   } else {
     const note = document.createElement("p");
     note.className = "detail-video-note";
     note.textContent = "Archived video has expired (or was never saved) — only the record remains.";
-    body.appendChild(note);
+    left.appendChild(note);
   }
 
   const chunksLabel = document.createElement("div");
   chunksLabel.className = "detail-section-label";
   chunksLabel.textContent = `Chunks (${rec.chunks.length})`;
-  body.appendChild(chunksLabel);
+  right.appendChild(chunksLabel);
 
   for (const c of rec.chunks) {
     const card = document.createElement("div");
@@ -746,18 +939,71 @@ async function openDetail(id) {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); card.click(); }
       });
     }
-    body.appendChild(card);
+    right.appendChild(card);
+    chunkCards[c.index] = card;
   }
 
   $("#detail-modal").hidden = false;
 }
 
+// ---------------------------------------------------------------------------
+// Detail modal: Prev/Next - steps through `navList` (every run on the current page,
+// in display order) so reviewing a long run of logs for false positives/negatives
+// doesn't mean closing the modal and clicking "View" again each time. Falling off
+// either end of the page loads the adjacent page and continues from its first/last
+// run, so paging never has to be done by hand mid-review.
+// ---------------------------------------------------------------------------
+function updateNavButtons() {
+  const havePos = navIndex >= 0;
+  $("#detail-prev").disabled = !havePos || (navIndex === 0 && page.offset <= 0);
+  $("#detail-next").disabled =
+    !havePos || (navIndex === navList.length - 1 && page.offset + page.limit >= page.total);
+  // navIndex counts runs on the current page, which isn't the same unit as
+  // page.offset/page.total (those count table entries - one per batch, however many
+  // runs it holds) - so this position is scoped to "this page's runs", not the whole
+  // filtered history.
+  $("#detail-nav-pos").textContent = havePos ? `${navIndex + 1} of ${navList.length} on this page` : "";
+}
+
+async function goRelative(dir) {
+  if (navIndex < 0) return;
+  const target = navIndex + dir;
+  if (target >= 0 && target < navList.length) {
+    openDetail(navList[target].id);
+    return;
+  }
+  if (dir < 0 && page.offset > 0) {
+    page.offset = Math.max(0, page.offset - page.limit);
+    await loadAll();
+    if (navList.length) openDetail(navList[navList.length - 1].id);
+  } else if (dir > 0 && page.offset + page.limit < page.total) {
+    page.offset += page.limit;
+    await loadAll();
+    if (navList.length) openDetail(navList[0].id);
+  }
+}
+
+$("#detail-prev").addEventListener("click", () => goRelative(-1));
+$("#detail-next").addEventListener("click", () => goRelative(1));
+
 $("#detail-close").addEventListener("click", () => { $("#detail-modal").hidden = true; });
 $("#detail-modal").addEventListener("click", (e) => {
   if (e.target.id === "detail-modal") $("#detail-modal").hidden = true;
 });
+$("#detail-export-csv").addEventListener("click", () => {
+  if (detailId) window.location.href = `/api/history/${detailId}/export/csv`;
+});
+$("#detail-export-json").addEventListener("click", () => {
+  if (detailId) window.location.href = `/api/history/${detailId}/export/json`;
+});
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") $("#detail-modal").hidden = true;
+  if ($("#detail-modal").hidden) return;
+  if (e.key === "Escape") { $("#detail-modal").hidden = true; return; }
+  // Leave arrow keys alone while the user is actually typing, or scrubbing the video.
+  const tag = (e.target.tagName || "").toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "video") return;
+  if (e.key === "ArrowRight") { e.preventDefault(); goRelative(1); }
+  else if (e.key === "ArrowLeft") { e.preventDefault(); goRelative(-1); }
 });
 
 // ---------------------------------------------------------------------------
@@ -772,6 +1018,7 @@ function statsQuery() {
   const qs = new URLSearchParams();
   if (filters.from != null) qs.set("date_from", filters.from);
   if (filters.to != null) qs.set("date_to", filters.to);
+  if (filters.batch) qs.set("batch", filters.batch);
   return qs;
 }
 
@@ -801,6 +1048,7 @@ function buildExportUrl(fmt) {
 
 $("#f-apply").addEventListener("click", () => {
   filters.q = $("#f-search").value.trim();
+  filters.batch = $("#f-batch").value.trim();
   filters.from = toEpoch($("#f-from").value, false);
   filters.to = toEpoch($("#f-to").value, true);
   page.offset = 0;
@@ -808,15 +1056,20 @@ $("#f-apply").addEventListener("click", () => {
 });
 $("#f-clear").addEventListener("click", () => {
   $("#f-search").value = "";
+  $("#f-batch").value = "";
   $("#f-from").value = "";
   $("#f-to").value = "";
   filters.q = "";
+  filters.batch = "";
   filters.from = null;
   filters.to = null;
   page.offset = 0;
   loadAll();
 });
 $("#f-search").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") $("#f-apply").click();
+});
+$("#f-batch").addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("#f-apply").click();
 });
 $("#export-csv").addEventListener("click", () => { window.location.href = buildExportUrl("csv"); });
@@ -836,5 +1089,17 @@ $("#page-next").addEventListener("click", () => {
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
+// Deep links from the Batch page: ?batch=<label> pre-filters the table to one batch
+// run, ?open=<id> jumps straight to one run's detail (e.g. a non-concise batch row's
+// "N chunks — View" link, which has no single answer to show inline).
+const deepLink = new URLSearchParams(window.location.search);
+const linkedBatch = deepLink.get("batch");
+const linkedOpen = deepLink.get("open");
+if (linkedBatch) {
+  filters.batch = linkedBatch;
+  $("#f-batch").value = linkedBatch;
+}
+
 refreshHealth();
 loadAll();
+if (linkedOpen) openDetail(linkedOpen);

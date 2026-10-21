@@ -9,7 +9,7 @@ import os
 import time
 
 import torch
-from transformers import AutoModelForImageTextToText, AutoProcessor
+from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig
 
 from .config import Settings
 
@@ -36,9 +36,18 @@ class ModelRuntime:
         load_kwargs = {"torch_dtype": "auto", "device_map": device_map}
         if s.flash_attn2:
             load_kwargs["attn_implementation"] = "flash_attention_2"
+        if s.quantize == "4bit":
+            load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_use_double_quant=True,
+            )
+        elif s.quantize == "8bit":
+            load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
 
         print(f"[model] loading {s.checkpoint_path} (device_map={device_map}, "
-              f"flash_attn2={s.flash_attn2}) ...", flush=True)
+              f"flash_attn2={s.flash_attn2}, quantize={s.quantize}) ...", flush=True)
         t0 = time.time()
         self.model = AutoModelForImageTextToText.from_pretrained(s.checkpoint_path, **load_kwargs)
         self.processor = AutoProcessor.from_pretrained(s.checkpoint_path)

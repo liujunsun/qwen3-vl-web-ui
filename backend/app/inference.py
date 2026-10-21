@@ -331,10 +331,19 @@ def stream_generate(
             generated += new_text
             yield _remove_image_special(generated)
     except queue.Empty:
-        runtime.gc()
+        # The background thread is still blocked inside model.generate() and there is no
+        # safe way to cancel it from here - it will keep running (and holding GPU memory)
+        # after this function returns. Treat it exactly like a CUDA fault: mark the
+        # runtime so the process restarts once this response is flushed, which is the
+        # only reliable way to reclaim the GPU from the stuck call instead of risking a
+        # second, concurrent generate() call on the same model from the next request.
+        runtime.faulted = True
+        msg = f"no output for {STREAM_TIMEOUT_S:.0f}s - giving up"
+        if raise_gpu_errors:
+            raise GpuFault(msg)
         generated += (
-            f"\n\n**[Error: no output for {STREAM_TIMEOUT_S:.0f}s - giving up. The GPU may be "
-            f"contended or the input too large. Try a shorter chunk length (Settings -> "
+            f"\n\n**[Error: {msg}. The server will restart itself to recover. The GPU may be "
+            f"contended or the input too large - try a shorter chunk length (Settings -> "
             f"Chunk length), or raise QWEN_STREAM_TIMEOUT.]**"
         )
         yield _remove_image_special(generated)

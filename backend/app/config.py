@@ -40,24 +40,28 @@ class Settings:
     # 'auto' splits across visible GPUs. 'cpu' forces CPU (slow).
     device: str = "cuda:0"
     flash_attn2: bool = False
+    # 'none' loads full-precision (bf16/fp16) weights. '4bit' / '8bit' load via
+    # bitsandbytes (NF4 / int8), cutting VRAM ~4x / ~2x for models that don't fit
+    # otherwise (e.g. 32B on a single 48 GB GPU). Needs `pip install bitsandbytes`.
+    quantize: str = "none"
     max_new_tokens: int = 1024
     # Every video question is answered chunk-by-chunk ("segmented analysis"); a video
     # is never sampled and fed to the model as a single whole-clip pass. Frame cap /
     # frame size are derived per chunk from the chunk's own duration (see
     # video.optimize_video_params); fps is the constant `sample_fps` below, applied
     # the same way to every chunk in a run.
-    segment_seconds: int = 60
+    segment_seconds: int = 30
     segment_overlap_frames: int = 4
     # Frames sampled per second of video, per chunk. Constant across every chunk in a
     # run (including a shorter final chunk) rather than scaling with chunk length.
-    sample_fps: float = 4.0
+    sample_fps: float = 1.0
     # Cap on visual tokens per chunk. The processor spreads a fixed pixel budget over
     # however many frames it gets, so fewer frames just means bigger frames - this is
     # the knob that actually bounds VRAM. 12288 matches the processor's own default.
     max_video_tokens: int = 4096
     # Skip a chunk (no model call) when less than this % of the picture changes.
     # 0 turns it off. See video.motion_score for how it is measured.
-    motion_threshold: float = 1.0
+    motion_threshold: float = 0.0
     # Analytics history: every segmented-analysis run is logged permanently (prompt,
     # settings, per-chunk output, stats). The archived video copy is deleted after this
     # many days to bound disk use; the record itself is kept forever. 0 = never archive
@@ -75,6 +79,7 @@ class Settings:
             checkpoint_path=_env_str("QWEN_CHECKPOINT", cls.checkpoint_path),
             device=_env_str("QWEN_DEVICE", cls.device),
             flash_attn2=_env_bool("QWEN_FLASH_ATTN2", cls.flash_attn2),
+            quantize=_env_str("QWEN_QUANTIZE", cls.quantize),
             max_new_tokens=_env_int("QWEN_MAX_NEW_TOKENS", cls.max_new_tokens),
             segment_seconds=_env_int("QWEN_SEGMENT_SECONDS", cls.segment_seconds),
             segment_overlap_frames=_env_int("QWEN_SEGMENT_OVERLAP_FRAMES", cls.segment_overlap_frames),

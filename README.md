@@ -33,15 +33,17 @@ processor with `do_sample_frames=False`; both paths were checked to produce byte
 `input_ids` and pixel values.
 
 Every video question is answered **chunk-by-chunk** (see
-[Segmented analysis](#segmented-live-view-analysis)) — there is no whole-clip pass, so a
+[Segmented analysis](#segmented-analysis)) — there is no whole-clip pass, so a
 10-minute video never has to fit in one prompt. Each chunk's answer is independent:
 nothing from an earlier chunk is fed back into the model, and there is no final
 reconciliation pass, so the model never has to hold previous output in its context.
 
 ## Requirements
 
-An NVIDIA GPU with ~20 GB free VRAM for the 8B model, CUDA-capable PyTorch, and
-Python 3.11. Tested on native Windows 11 with 2× RTX A6000; Linux works too.
+An NVIDIA GPU with ~20 GB free VRAM for the 8B model (full precision), CUDA-capable
+PyTorch, and Python 3.11. Tested on native Windows 11 with 2× RTX A6000; Linux works
+too. Bigger checkpoints (e.g. 32B) need either more VRAM or [quantized
+loading](#quantized-loading-smaller-vram-footprint) — see that section for sizing.
 
 ## Setup (one time)
 
@@ -69,6 +71,14 @@ python run.py -c Qwen/Qwen3-VL-8B-Instruct
 
 Wait for `[model] warmup done`, then open <http://127.0.0.1:8000>.
 
+To load a bigger checkpoint than your GPU has room for at full precision (e.g. 32B on
+a single 48 GB card), add `--quantize 4bit` — see [Quantized
+loading](#quantized-loading-smaller-vram-footprint) below.
+
+```powershell
+python run.py -c Qwen/Qwen3-VL-32B-Instruct --quantize 4bit
+```
+
 ### Useful flags
 
 | Flag | Default | Meaning |
@@ -76,13 +86,15 @@ Wait for `[model] warmup done`, then open <http://127.0.0.1:8000>.
 | `-c, --checkpoint-path` | `Qwen/Qwen3-VL-8B-Instruct` | model name or local path |
 | `--device` | `cuda:0` | `cuda:0` (one GPU, fastest) · `auto` (split) · `cpu` |
 | `--flash-attn2` | off | use flash-attention (needs `flash-attn` installed) |
+| `--quantize` | `none` | `none` · `4bit` · `8bit` — load weights quantized via `bitsandbytes` to fit a bigger model in less VRAM (needs `pip install bitsandbytes`); see [Quantized loading](#quantized-loading-smaller-vram-footprint) |
 | `--max-new-tokens` | `1024` | default generation length |
-| `--segment-seconds` | `60` | seconds of video per chunk — every video question is answered chunk-by-chunk, there is no whole-clip option |
+| `--segment-seconds` | `30` | seconds of video per chunk — every video question is answered chunk-by-chunk, there is no whole-clip option |
+| `--sample-fps` | `1.0` | frames sampled per second of video, per chunk — constant for every chunk in a run |
 | `--segment-overlap-frames` | `4` | frames of the previous chunk carried into the next |
 | `--max-video-tokens` | `4096` | visual tokens per chunk; frames are downscaled to fit. The main VRAM knob — lowering fps alone does not save memory, it only makes each frame larger |
 | `--history-retention-days` | `30` | days an archived video is kept for the [analytics dashboard](#analytics-dashboard) before it's deleted (`0` = never archive video, metadata only); the run record itself is kept forever |
 | `--host` / `--port` | `127.0.0.1` / `8000` | bind address |
-| `--motion-threshold` | `1.0` | skip chunks where less than this % of the picture changes (`0` = off) |
+| `--motion-threshold` | `0.0` | skip chunks where less than this % of the picture changes (`0` = off) |
 | `--supervise` / `--no-supervise` | on | restart the server automatically after a crash or unrecoverable GPU error |
 | `--reload` | off | dev auto-reload (also reloads the model) |
 
@@ -113,6 +125,35 @@ python run.py -c Qwen/Qwen3-VL-8B-Instruct --min-free-gb 20 --strict-vram
 The preflight only manages Ollama and our own cache; it lists other GPU processes
 (training jobs, browsers) but does not kill them.
 
+### Quantized loading (smaller VRAM footprint)
+
+Weights normally load at the checkpoint's native precision (bf16, 2 bytes/param) — a
+32B model needs **~64 GB** of VRAM just for the weights, before any KV cache for
+generation. `--quantize` loads the same checkpoint through `bitsandbytes`, storing
+weights at lower precision instead:
+
+| `--quantize` | Bytes/param | 32B model weights | Notes |
+| --- | --- | --- | --- |
+| `none` (default) | 2 (bf16) | ~64 GB | full precision |
+| `8bit` | 1 | ~32 GB | int8, closest to full-precision quality |
+| `4bit` | 0.5 | ~16 GB | NF4 + double quantization; small quality tradeoff, biggest VRAM win |
+
+```powershell
+pip install bitsandbytes    # one-time, not in requirements-model.txt by default
+
+python run.py -c Qwen/Qwen3-VL-32B-Instruct --quantize 4bit
+```
+
+No separate quantized checkpoint is needed — `--quantize` quantizes the normal
+`Qwen/Qwen3-VL-*-Instruct` weights on load, inside [`model_runtime.py`](backend/app/model_runtime.py).
+The first run still downloads the full-precision weights from Hugging Face (quantization
+happens after download, not before), so disk/bandwidth cost is the same as loading
+unquantized — only VRAM at *runtime* shrinks.
+
+Like `--checkpoint-path`, `--device` and `--flash-attn2`, `--quantize` is a load-time
+flag: it's shown read-only on the [Settings page](#settings-page) and changing it needs
+a restart.
+
 ### GPU memory recovery
 
 Two failures are handled differently, because they need different fixes:
@@ -129,20 +170,21 @@ failure such as the port already being in use.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/health` | `{status, model, device, backend, flash_attn2}` |
+| `GET` | `/api/health` | `{status, model, device, backend, flash_attn2, quantize}` |
 | `POST` | `/api/upload` | multipart `file` → `{id, kind, name}` |
 | `POST` | `/api/chat` | `{messages:[…], options?:{…}}` → SSE stream of one `{stats}`, then `{delta}` / `{replace}`, then `{done:true}`. Text and image messages only — a `video` content part is rejected; every video question goes through `/api/chat/segmented` instead. |
-| `POST` | `/api/chat/segmented` | `{video_id, prompt, options?, segment_seconds?, overlap_frames?}` → SSE stream of `{plan}`, then per chunk `{segment_start}` · `{segment_stats}` · `{segment_delta}`/`{segment_replace}` · `{segment_done}`, then `{done:true}` |
+| `POST` | `/api/chat/segmented` | `{video_id, prompt, options?, segment_seconds?, overlap_frames?, answer_style?, batch_label?, live_session?, continue_record_id?}` → SSE stream of `{plan}`, then per chunk `{segment_start}` · `{segment_stats}` · `{segment_delta}`/`{segment_replace}` · `{segment_done}`, then `{done:true, record_id}`. `batch_label` tags the logged run for [Batch Processing](#batch-processing). `live_session`/`continue_record_id` are [Live View](#live-view-webcam)'s — every clip after a session's first passes the prior clip's `record_id` back as `continue_record_id` so they accumulate into one History row. Omit all four for an ordinary single-video question. |
 | `POST` | `/api/reset` | delete staged uploads |
 | `GET` | `/api/settings` | current defaults, launch defaults, control ranges |
 | `PUT` | `/api/settings` | partial update of the editable defaults (persisted) |
 | `POST` | `/api/settings/reset` | discard saved overrides, return to launch flags |
-| `GET` | `/api/history` | `?q&date_from&date_to&limit&offset` → paginated list of past segmented-analysis runs |
-| `GET` | `/api/history/stats` | `?date_from&date_to` → aggregate stats (totals + daily series + clip-length histogram) for the dashboard |
+| `GET` | `/api/history` | `?q&date_from&date_to&limit&offset&batch` → paginated list of past segmented-analysis runs; `batch` filters to one [batch label](#batch-processing) |
+| `GET` | `/api/history/stats` | `?date_from&date_to&batch` → aggregate stats (totals + daily series + clip-length histogram) for the dashboard |
 | `GET` | `/api/history/{id}` | one run's full detail: prompt, settings snapshot, every chunk's output + stats |
 | `DELETE` | `/api/history/{id}` | permanently delete a run (and its archived video, if any) |
 | `GET` | `/api/history/{id}/video` | the archived source video, if it hasn't aged out |
-| `GET` | `/api/history/export/{csv\|json}` | `?q&date_from&date_to` → download matching runs |
+| `GET` | `/api/history/export/{csv\|json}` | `?q&date_from&date_to` → download matching runs (bulk summary) |
+| `GET` | `/api/history/{id}/export/{csv\|json}` | one run's full prompt + settings + every chunk's output |
 
 ## Settings page
 
@@ -156,7 +198,7 @@ fps / frame cap / frame size from its length), and generation has no sampling kn
 | Editable live | Why it is safe to change |
 | --- | --- |
 | `max_new_tokens` | a `generate()` argument — caps response length |
-| `segment_seconds`, `segment_overlap_frames` | shape the chunks every video question is split into (see [segmented analysis](#segmented-live-view-analysis)) |
+| `segment_seconds`, `segment_overlap_frames` | shape the chunks every video question is split into (see [segmented analysis](#segmented-analysis)) |
 
 Values resolve in this order:
 
@@ -168,9 +210,10 @@ per-request `options`  >  saved override (settings.json)  >  launch flag (CLI/en
 as a record of what you changed. **Reset to launch defaults** deletes it. A field set back
 to its launch value stops being an override automatically.
 
-`--checkpoint-path`, `--device` and `--flash-attn2` are consumed by `from_pretrained` at
-load time, so they are shown read-only under **Launch flags** — changing them requires a
-restart. They are deliberately *not* editable over HTTP: this server has no authentication,
+`--checkpoint-path`, `--device`, `--flash-attn2` and `--quantize` are consumed by
+`from_pretrained` at load time, so they are shown read-only under **Launch flags** —
+changing them requires a restart. They are deliberately *not* editable over HTTP: this
+server has no authentication,
 and a frontend-editable checkpoint path would let anyone who can reach it pull arbitrary
 weights onto the GPU box.
 
@@ -184,7 +227,7 @@ grows, so decode time and the raw-frame buffer stay bounded regardless of clip l
 
 Loading a video opens a **player pane** below the header. Video never joins the text
 chat (images and text still go through the normal `/api/chat` conversation) — a staged
-video plus a question always runs [segmented analysis](#segmented-live-view-analysis):
+video plus a question always runs [segmented analysis](#segmented-analysis):
 
 1. **Load the video** (＋) — it appears in the player right away.
 2. **Ask a question.** The player stays put with native controls, so you can scrub, seek,
@@ -195,7 +238,7 @@ video plus a question always runs [segmented analysis](#segmented-live-view-anal
 Playback is entirely client-side — the same file already uploaded for inference, played
 from a local object URL; nothing extra is sent to the backend.
 
-## Segmented ("live view") analysis
+## Segmented analysis (Single Processing)
 
 A single whole-clip prompt does not scale past a few minutes of video — it either runs
 the GPU out of memory or blows the stream timeout during prefill, and lowering FPS or the
@@ -245,6 +288,10 @@ each chunk reports it separately rather than the run producing one merged count.
 The whole run holds the single generation lock, so ordinary `/api/chat` requests wait
 until it finishes.
 
+This whole section is what the **📷 Live Feed** button in the header is *not* — that's
+a different input entirely (your camera, not a staged file); see
+[Live View (webcam)](#live-view-webcam) below.
+
 ### Motion skip
 
 Before a chunk is sent to the model, `video.motion_score` measures what % of the
@@ -267,13 +314,54 @@ picture changed, so neither did the answer) and is counted separately in the spa
 chunk with no usable answer - an error, or a reply longer than a few words - ends the
 span.
 
+## Live View (webcam)
+
+**📷 Live Feed** in the composer is a genuinely different input from everything above:
+your browser's own camera (`getUserMedia`), not a staged file — there is no fixed
+duration and no upfront chunk plan, so it isn't another mode over
+[Segmented analysis](#segmented-analysis), it's a separate entry point. Starting it and
+staging a file are mutually exclusive — doing one drops the other.
+
+Once you type a question and hit **Send** (it becomes **Stop** for the duration), the
+browser loops indefinitely until you stop it:
+
+1. Record one clip with `MediaRecorder`, exactly **Chunk length** seconds long.
+2. Upload it (`POST /api/upload` — same endpoint as any other file; `.webm`, what
+   `MediaRecorder` produces, is already an accepted video extension) and analyse it
+   (`POST /api/chat/segmented` — same endpoint, same chunking/answer-style/motion-skip
+   machinery as above). Because the clip is already exactly one chunk long, each call
+   produces exactly one chunk.
+3. Render the answer as a new card and go back to step 1, immediately.
+
+One standing question, asked over and over — pairs especially well with **Concise** for
+a repeating Yes/No log (e.g. "is anyone smoking right now?", checked every 30s).
+
+**One growing log, not one row per clip:** a 20-minute session at a 30s chunk length is
+40 clips, and that must not mean 40 separate History rows. The first clip creates a
+normal row like any other run; every clip after it sends that row's id back as
+`continue_record_id`, and the server appends to it (`history.append_record`) instead of
+inserting a new one — `chunk_count`, `video_duration`, token/frame totals all
+accumulate, and `status` only ever escalates to `error`, never back to `ok`, so one bad
+clip in an hour-long session doesn't get silently overwritten by the next good one. No
+video is archived for a live session (there's no single coherent source file worth
+keeping), and the record is tagged `"source": "live"` in its settings snapshot so it
+reads as a live-feed run rather than an uploaded one in the [detail
+view](#analytics-dashboard).
+
+> **Known gap:** a session's stored **Concise timeline** only reflects its *first*
+> clip — `history.append_record` doesn't recompute it across appended clips, since each
+> clip builds its own `Timeline` instance server-side with no memory of earlier ones.
+> The on-screen log during the session is unaffected (every clip's card is there,
+> correct and in order) — this only affects the summarized Timeline you'd see
+> afterward in that run's Analytics detail view.
+
 ## Analytics dashboard
 
 `📊 Analytics` in the header opens **`frontend/analytics.html`**. Every
 `/api/chat/segmented` run — one video, one prompt, chunk-by-chunk — is logged
 permanently by `backend/app/history.py` (plain SQLite, no extra dependency): the
 prompt, the settings snapshot used (chunk length, carry-over frames, max new tokens,
-[answer style](#segmented-live-view-analysis), the sampling `optimize_video_params`
+[answer style](#segmented-analysis), the sampling `optimize_video_params`
 picked), every chunk's output and per-chunk stats
 (prompt tokens, frames), and timing (processing time, and `time_saved = video_duration
 - processing_time`, summed for the dashboard's headline stat). Plain `/api/chat`
@@ -284,6 +372,25 @@ The archived copy of the source video is deleted after `--history-retention-days
 (default 30) to bound disk use; the row itself — and every stat derived from it — is
 kept forever, so old runs still count once their video has aged out. A background
 sweep checks hourly, plus once at startup.
+
+## Batch Processing
+
+`🗂 Batch` in the header opens **`frontend/batch.html`**: the same question, run across
+many videos in one go. There is no new inference path — each video is staged with the
+normal `POST /api/upload` and answered with the normal `POST /api/chat/segmented`
+(same chunking, same [answer style](#segmented-analysis), same
+[analytics](#analytics-dashboard) logging) one after another. One GPU / one model
+instance means sequential is a hard requirement, not a setting — there is no
+parallel-speedup mode to turn on.
+
+Every video in a run is tagged with a shared **batch label** (typed, or auto-generated
+as `batch-YYYYMMDD-HHMMSS`), stored as a plain column on its history row
+(`backend/app/history.py`'s `batch_label`). A batch is not its own stored entity — it's
+just a tag on ordinary runs, so **Analytics** can filter back to exactly that set via
+`?batch=<label>` (or the **Batch** search field in its filter row), and the results
+table on the Batch page itself links each row straight to that run's detail
+(`analytics.html?open=<id>`). **Cancel remaining** stops queuing further videos once the
+one currently running finishes — there is no way to abort a request already in flight.
 
 Asking several questions about the same staged video does **not** archive it more than
 once: `archive_video` dedups on the upload id, so run 2 and run 3 reuse run 1's copy
@@ -302,7 +409,7 @@ The dashboard has:
   - **Line + area** — cumulative time saved, growing over time.
   - **Bar** — prompts per day, and a clip-length distribution.
   - **Segmented bar** — part-to-whole share of Auto / Concise / Detailed
-    [answer style](#segmented-live-view-analysis) across all runs.
+    [answer style](#segmented-analysis) across all runs.
   - **Scatter** — clip length vs. processing time per run, so you can see whether
     longer clips cost proportionally more time or not (red dots errored).
 

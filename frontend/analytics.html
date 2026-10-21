@@ -17,6 +17,8 @@
       <span id="badge" class="badge" title="backend status">connecting…</span>
     </div>
     <div class="header-actions">
+      <a class="btn-link ghost" href="live.html" title="Continuous analysis from your webcam">📷 Live View</a>
+      <a class="btn-link ghost" href="batch.html" title="Run one question across many videos">🗂 Batch</a>
       <a class="btn-link ghost" href="settings.html" title="Generation defaults">⚙ Settings</a>
       <a class="btn-link ghost" href="index.html">← Back to chat</a>
     </div>
@@ -34,6 +36,7 @@
     <section class="card">
       <div class="filter-row">
         <input id="f-search" type="search" placeholder="Search prompt or video name…" />
+        <input id="f-batch" type="search" placeholder="Batch label…" title="Filter to one Batch Processing run" />
         <label class="filter-date">From <input id="f-from" type="date" /></label>
         <label class="filter-date">To <input id="f-to" type="date" /></label>
         <button id="f-apply" class="ghost sm" type="button">Apply</button>
@@ -96,6 +99,7 @@
             <tr>
               <th>Date</th>
               <th>Video</th>
+              <th>Model</th>
               <th>Duration</th>
               <th>Prompt</th>
               <th>Chunks</th>
@@ -119,7 +123,13 @@
   <div id="detail-modal" class="modal-overlay" hidden>
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="detail-title">
       <div class="modal-head">
+        <button id="detail-prev" class="ghost sm" type="button" title="Previous log (←)">◂ Prev</button>
+        <button id="detail-next" class="ghost sm" type="button" title="Next log (→)">Next ▸</button>
         <h3 id="detail-title">Run detail</h3>
+        <span id="detail-nav-pos" class="detail-nav-pos"></span>
+        <span class="stage-spacer"></span>
+        <button id="detail-export-csv" class="ghost sm" type="button">Export CSV</button>
+        <button id="detail-export-json" class="ghost sm" type="button">Export JSON</button>
         <button id="detail-close" class="ghost sm" type="button">✕</button>
       </div>
       <div id="detail-body" class="modal-body"></div>

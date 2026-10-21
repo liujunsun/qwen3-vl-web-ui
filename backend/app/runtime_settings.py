@@ -10,8 +10,9 @@
 # Precedence for any one field:
 #     per-request options  >  saved override (settings.json)  >  launch default (CLI/env)
 #
-# Only knobs that need no reload live here. checkpoint_path / device / flash_attn2 are
-# baked into `from_pretrained` and are deliberately NOT editable at runtime. Every video
+# Only knobs that need no reload live here. checkpoint_path / device / flash_attn2 /
+# quantize are baked into `from_pretrained` and are deliberately NOT editable at
+# runtime. Every video
 # is analysed chunk-by-chunk; each chunk's frame cap / frame size are derived
 # automatically from its own duration (see video.optimize_video_params), while its
 # sampling rate (fps) is the constant `sample_fps` knob below - the same for every
@@ -72,6 +73,14 @@ FIELD_SPEC: Dict[str, Dict[str, Any]] = {
                 "chunks measure ~0.3-0.9% and real activity 1.5%+. The first chunk is never "
                 "skipped. 0 = off.",
     },
+    "default_prompt": {
+        "kind": "text", "max_len": 4000,
+        "label": "Default prompt / rules",
+        "help": "Prepended to every question before it's sent to the model, on every chunk "
+                "of every video - use it to encode standing rules or definitions (e.g. what "
+                "counts as a 'yes', terms to look for) that should always apply, regardless "
+                "of what's actually asked. Leave blank to send only your question as-is.",
+    },
 }
 
 
@@ -79,12 +88,17 @@ FIELD_SPEC: Dict[str, Dict[str, Any]] = {
 class GenerationDefaults:
     """The live-editable knobs. Frozen so it is swapped atomically, never mutated."""
 
+    # These are only ever used before init_defaults(settings) runs at startup, which
+    # immediately overwrites them from backend/app/config.py's Settings (itself mirrored
+    # in backend/run.py's CLI defaults) - kept in sync with those two so a future direct
+    # construction (a test, a script) doesn't silently get different numbers.
     max_new_tokens: int = 1024
-    segment_seconds: int = 60
+    segment_seconds: int = 30
     segment_overlap_frames: int = 4
-    sample_fps: float = 4.0
+    sample_fps: float = 1.0
     max_video_tokens: int = 4096
-    motion_threshold: float = 1.0
+    motion_threshold: float = 0.0
+    default_prompt: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -97,6 +111,10 @@ def coerce(field: str, value: Any) -> Any:
         if isinstance(value, str):
             return value.strip().lower() in ("1", "true", "yes", "on")
         return bool(value)
+    if spec["kind"] == "text":
+        s = "" if value is None else str(value)
+        max_len = spec.get("max_len")
+        return s[:max_len] if max_len else s
     try:
         num = int(round(float(value))) if spec["kind"] == "int" else float(value)
     except (TypeError, ValueError):

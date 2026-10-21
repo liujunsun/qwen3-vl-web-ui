@@ -14,6 +14,7 @@ const resetBtn = $("#reset-btn");
 const SEGMENT_FIELDS = [
   "segment_seconds", "segment_overlap_frames", "sample_fps", "max_video_tokens", "motion_threshold",
 ];
+const PROMPT_FIELDS = ["default_prompt"];
 
 let spec = null;        // full /api/settings payload
 let saved = {};         // values as the server currently has them
@@ -42,7 +43,10 @@ async function load() {
   draft = { ...spec.defaults };
 
   buildFields("#fields-segment", SEGMENT_FIELDS);
-  buildFields("#fields-gen", Object.keys(spec.fields).filter((f) => !SEGMENT_FIELDS.includes(f)));
+  buildFields("#fields-prompt", PROMPT_FIELDS);
+  buildFields("#fields-gen", Object.keys(spec.fields).filter(
+    (f) => !SEGMENT_FIELDS.includes(f) && !PROMPT_FIELDS.includes(f)
+  ));
   buildLocked();
   syncAll();
 }
@@ -63,6 +67,25 @@ function buildFields(containerSel, fields) {
 
     const row = document.createElement("div");
     row.className = "field";
+
+    if (f.kind === "text") {
+      row.innerHTML = `
+        <div class="field-head">
+          <label for="in-${name}">${f.label}</label>
+          <span class="field-flag" data-flag="${name}" hidden>overridden</span>
+        </div>
+        <p class="field-help">${f.help}</p>
+        <textarea id="in-${name}" class="field-textarea" rows="4"
+          maxlength="${f.max_len || 4000}"
+          placeholder="Blank — only your question is sent, as-is."></textarea>`;
+      host.appendChild(row);
+
+      const textarea = row.querySelector(`#in-${name}`);
+      inputs[name] = { textarea, row };
+      textarea.addEventListener("input", () => setValue(name, textarea.value));
+      continue;
+    }
+
     row.innerHTML = `
       <div class="field-head">
         <label for="in-${name}">${f.label}</label>
@@ -95,6 +118,7 @@ function fmt(value, f) {
 
 function clamp(name, raw) {
   const f = spec.fields[name];
+  if (f.kind === "text") return String(raw ?? "").slice(0, f.max_len || 4000);
   let v = Number(raw);
   if (!Number.isFinite(v)) v = spec.launch_defaults[name];
   if (f.kind === "int") v = Math.round(v);
@@ -111,8 +135,12 @@ function syncAll() {
     const v = draft[name];
     const flag = el.row.querySelector(`[data-flag="${name}"]`);
 
-    if (el.range.value !== String(v)) el.range.value = v;
-    if (document.activeElement !== el.number) el.number.value = v;
+    if (el.textarea) {
+      if (document.activeElement !== el.textarea) el.textarea.value = v;
+    } else {
+      if (el.range.value !== String(v)) el.range.value = v;
+      if (document.activeElement !== el.number) el.number.value = v;
+    }
     // "overridden" = differs from how the server was launched.
     flag.hidden = v === spec.launch_defaults[name];
     el.row.classList.toggle("dirty", v !== saved[name]);
@@ -139,6 +167,7 @@ function buildLocked() {
     checkpoint_path: "Checkpoint",
     device: "Device",
     flash_attn2: "Flash-Attention 2",
+    quantize: "Quantization",
     history_retention_days: "History video retention (days)",
     host: "Host",
     port: "Port",

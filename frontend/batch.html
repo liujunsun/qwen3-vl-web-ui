@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Batch · Qwen3-VL · SP</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="settings-body">
+  <header class="app-header">
+    <div class="title">
+      <span class="brand-mark" aria-hidden="true">SP</span>
+      <div class="brand-lines">
+        <h1>Batch</h1>
+        <span class="brand-sub">Singapore Polytechnic · Qwen3-VL</span>
+      </div>
+      <span id="badge" class="badge" title="backend status">connecting…</span>
+    </div>
+    <div class="header-actions">
+      <a class="btn-link ghost" href="live.html" title="Continuous analysis from your webcam">📷 Live View</a>
+      <a class="btn-link ghost" href="analytics.html" title="Usage history &amp; stats">📊 Analytics</a>
+      <a class="btn-link ghost" href="settings.html" title="Generation defaults">⚙ Settings</a>
+      <a class="btn-link ghost" href="index.html">← Back to chat</a>
+    </div>
+  </header>
+
+  <main class="settings-main analytics-main">
+    <p class="settings-intro">
+      Ask the same question across many videos in one go. Each video is processed
+      one after another (one GPU, one model — there's no parallel speedup to be had),
+      logged to <a href="analytics.html">History</a> exactly like any other run, and
+      tagged with this batch's label so you can filter them back out as a group later.
+    </p>
+
+    <!-- Batch setup -->
+    <section class="card">
+      <h2>Run a batch</h2>
+      <div class="fields">
+        <div class="field">
+          <div class="field-head"><label for="batch-files">Videos</label></div>
+          <p class="field-help">Pick two or more video files. They run in the order selected.</p>
+          <input id="batch-files" type="file" accept="video/*" multiple />
+          <ul id="batch-file-list" class="batch-file-list"></ul>
+        </div>
+
+        <div class="field">
+          <div class="field-head"><label for="batch-prompt">Question</label></div>
+          <p class="field-help">Sent as-is to every video (plus the standing Default Prompt rules from Settings).</p>
+          <textarea id="batch-prompt" class="field-textarea" rows="3" placeholder="e.g. Is anyone smoking in this video?"></textarea>
+        </div>
+
+        <div class="field">
+          <div class="field-head"><label>Answer style</label></div>
+          <div id="batch-answer-style-row" class="answer-style-toggle" role="radiogroup" aria-label="Answer style">
+            <button type="button" class="as-btn" data-style="auto" aria-pressed="true"
+                    title="No extra instruction — the model judges the answer's length itself">Auto</button>
+            <button type="button" class="as-btn" data-style="concise" aria-pressed="false"
+                    title="For yes/no or counting questions — bare 'Yes'/'No' or a number, joined into a timeline per video">Concise</button>
+            <button type="button" class="as-btn" data-style="detailed" aria-pressed="false"
+                    title="For descriptive or reasoning questions — a short explanation">Detailed</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="field-head"><label for="batch-label">Batch label</label></div>
+          <p class="field-help">Tags every run in this batch so you can filter for them in Analytics. Auto-generated if left blank.</p>
+          <input id="batch-label" type="text" placeholder="batch-20260101-120000" maxlength="200" />
+        </div>
+      </div>
+
+      <div class="batch-actions">
+        <button id="batch-run" type="button">Run batch</button>
+        <button id="batch-cancel" type="button" class="ghost" disabled>Cancel remaining</button>
+        <span id="batch-status" class="save-status"></span>
+      </div>
+    </section>
+
+    <!-- Results -->
+    <section id="batch-results-card" class="card" hidden>
+      <h2>Results</h2>
+      <div class="table-wrap">
+        <table class="history-table">
+          <thead>
+            <tr>
+              <th>Video</th>
+              <th>Status</th>
+              <th>Result</th>
+            </tr>
+          </thead>
+          <tbody id="batch-tbody"></tbody>
+        </table>
+      </div>
+      <p id="batch-view-all" class="field-help" hidden></p>
+    </section>
+  </main>
+
+  <script src="markdown.js"></script>
+  <script src="batch.js"></script>
+</body>
+</html>

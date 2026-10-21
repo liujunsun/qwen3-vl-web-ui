@@ -75,6 +75,10 @@ def main() -> None:
                              "auto = split across GPUs; cpu = CPU only (slow). Default: %(default)s")
     parser.add_argument("--flash-attn2", action="store_true",
                         help="Load with attn_implementation=flash_attention_2 (needs flash-attn).")
+    parser.add_argument("--quantize", default="none", choices=["none", "4bit", "8bit"],
+                        help="Load weights quantized via bitsandbytes to cut VRAM - 4bit "
+                             "(~4x smaller, NF4) or 8bit (~2x smaller). Needs "
+                             "`pip install bitsandbytes`. Default: %(default)s")
 
     # --- startup preflight (free VRAM before loading the model) -------------------
     parser.add_argument("--free-ollama", action=argparse.BooleanOptionalAction, default=True,
@@ -92,18 +96,18 @@ def main() -> None:
                         help="Skip the GPU cache-clear / VRAM preflight entirely.")
     parser.add_argument("--max-new-tokens", type=int, default=1024,
                         help="Default generation length (default: %(default)s)")
-    parser.add_argument("--segment-seconds", type=int, default=60,
+    parser.add_argument("--segment-seconds", type=int, default=30,
                         help="Seconds of video per chunk - every video question is answered "
                              "chunk-by-chunk (default: %(default)s)")
     parser.add_argument("--segment-overlap-frames", type=int, default=4,
                         help="Frames of the previous chunk carried into the next (default: %(default)s)")
-    parser.add_argument("--sample-fps", type=float, default=4.0,
+    parser.add_argument("--sample-fps", type=float, default=1.0,
                         help="Frames sampled per second of video, per chunk - the same rate for "
                              "every chunk in a run (default: %(default)s)")
     parser.add_argument("--max-video-tokens", type=int, default=4096,
                         help="Visual tokens per chunk - frames are downscaled to fit. The main "
                              "VRAM knob; lower it if you run out of GPU memory (default: %(default)s)")
-    parser.add_argument("--motion-threshold", type=float, default=1.0,
+    parser.add_argument("--motion-threshold", type=float, default=0.0,
                         help="Skip chunks where less than this %% of the picture changes "
                              "(0 = off, default: %(default)s)")
     parser.add_argument("--history-retention-days", type=int, default=30,
@@ -125,6 +129,7 @@ def main() -> None:
     os.environ["QWEN_CHECKPOINT"] = args.checkpoint_path
     os.environ["QWEN_DEVICE"] = args.device
     os.environ["QWEN_FLASH_ATTN2"] = "1" if args.flash_attn2 else "0"
+    os.environ["QWEN_QUANTIZE"] = args.quantize
     os.environ["QWEN_MAX_NEW_TOKENS"] = str(args.max_new_tokens)
     os.environ["QWEN_SEGMENT_SECONDS"] = str(args.segment_seconds)
     os.environ["QWEN_SEGMENT_OVERLAP_FRAMES"] = str(args.segment_overlap_frames)

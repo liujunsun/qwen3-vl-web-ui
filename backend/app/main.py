@@ -136,6 +136,7 @@ async def health() -> HealthResponse:
         device=rt.device_str,
         backend=rt.backend,
         flash_attn2=settings.flash_attn2,
+        quantize=settings.quantize,
     )
 
 
@@ -180,6 +181,7 @@ def _settings_payload() -> SettingsResponse:
             "checkpoint_path": settings.checkpoint_path,
             "device": get_runtime().device_str,
             "flash_attn2": settings.flash_attn2,
+            "quantize": settings.quantize,
             "history_retention_days": settings.history_retention_days,
             "host": settings.host,
             "port": settings.port,
@@ -396,13 +398,20 @@ async def chat_segmented(req: SegmentedChatRequest):
 
     record_id = history.new_id()
     created_at = time.time()
+    # The id this clip's analysis will actually be filed under: a Live View clip after
+    # the first reuses the session's existing row (see history.append_record) instead
+    # of getting a fresh one, so the frontend must learn that id, not always `record_id`.
+    final_record_id = req.continue_record_id or record_id
 
     async def event_stream():
         # Copy the video into permanent storage in parallel with generation, so a big
         # file doesn't add to time-to-first-token; only awaited once the run finishes.
         # archive_video dedups on req.video_id, so asking several questions about the
         # same staged video reuses one archived copy instead of one per question.
-        archive_task = asyncio.create_task(
+        # Skipped entirely for a Live View clip: there's no single coherent source file
+        # worth archiving for a rolling-clip session, and skipping avoids disk churn
+        # from potentially dozens of small recordings.
+        archive_task = None if req.live_session else asyncio.create_task(
             asyncio.to_thread(history.archive_video, record_id, path, req.video_id)
         )
         chunk_records: list = []
@@ -428,7 +437,10 @@ async def chat_segmented(req: SegmentedChatRequest):
                         f"[Segment {idx + 1} of {n_segments}: {_fmt_ts(seg['start'])}"
                         f"–{_fmt_ts(seg['end'])} of a {_fmt_ts(duration)} video]"
                     )
-                    prompt_text = f"{label}\n{req.prompt}"
+                    prompt_text = f"{label}\n"
+                    if opts.default_prompt:
+                        prompt_text += f"{opts.default_prompt}\n\n"
+                    prompt_text += req.prompt
                     if style_instruction:
                         prompt_text += f"\n\n{style_instruction}"
                     messages = [{
@@ -518,35 +530,58 @@ async def chat_segmented(req: SegmentedChatRequest):
                         yield _sse({"fault": True})
                         break
 
-                yield _sse({"done": True})
+                yield _sse({"done": True, "record_id": final_record_id})
         finally:
             # Runs on normal completion, on an unhandled error, and on early client
             # disconnect (GeneratorExit) alike, so every run - partial or not - is
             # logged with whatever chunks it actually produced.
-            try:
-                video_path = await archive_task
-            except Exception:  # noqa: BLE001 - a missing archive copy is not fatal
-                video_path = None
-            fps, max_frames, max_side = optimize_video_params(seg_len, opts.sample_fps)
-            settings_snapshot = {
-                "segment_seconds": seg_len,
-                "overlap_frames": overlap_frames,
-                "max_new_tokens": opts.max_new_tokens,
-                "sample_fps": opts.sample_fps,
-                "answer_style": req.answer_style,
-                "max_video_tokens": opts.max_video_tokens,
-                "motion_threshold": opts.motion_threshold,
-                "sampling": {"fps": fps, "max_frames": max_frames, "max_side": max_side},
-            }
-            if concise:
-                settings_snapshot["timeline"] = timeline.as_list()
-            await asyncio.to_thread(
-                history.finalize_record,
-                record_id, created_at, video_name, duration, video_path,
-                req.prompt, settings_snapshot, chunk_records,
-                time.monotonic() - t0, run_status if chunk_records else "error",
-                req.video_id,
-            )
+            video_path = None
+            if archive_task is not None:
+                try:
+                    video_path = await archive_task
+                except Exception:  # noqa: BLE001 - a missing archive copy is not fatal
+                    video_path = None
+            final_status = run_status if chunk_records else "error"
+
+            appended = False
+            if req.continue_record_id:
+                appended = await asyncio.to_thread(
+                    history.append_record, req.continue_record_id, chunk_records,
+                    duration, time.monotonic() - t0, final_status,
+                )
+            if not appended:
+                # Either the first clip of a session (no continue_record_id yet), an
+                # ordinary non-live run, or continue_record_id was stale (its row was
+                # deleted from Analytics mid-session) - start a fresh row either way.
+                fps, max_frames, max_side = optimize_video_params(seg_len, opts.sample_fps)
+                settings_snapshot = {
+                    # checkpoint_path/device are launch-time, not request-time - captured
+                    # here so a run stays attributable to the model that actually
+                    # produced it even after the server is restarted with a different
+                    # --checkpoint-path.
+                    "checkpoint_path": settings.checkpoint_path,
+                    "device": rt.device_str,
+                    "segment_seconds": seg_len,
+                    "overlap_frames": overlap_frames,
+                    "max_new_tokens": opts.max_new_tokens,
+                    "sample_fps": opts.sample_fps,
+                    "answer_style": req.answer_style,
+                    "max_video_tokens": opts.max_video_tokens,
+                    "motion_threshold": opts.motion_threshold,
+                    "default_prompt": opts.default_prompt,
+                    "sampling": {"fps": fps, "max_frames": max_frames, "max_side": max_side},
+                }
+                if req.live_session:
+                    settings_snapshot["source"] = "live"
+                if concise:
+                    settings_snapshot["timeline"] = timeline.as_list()
+                await asyncio.to_thread(
+                    history.finalize_record,
+                    record_id, created_at, video_name, duration, video_path,
+                    req.prompt, settings_snapshot, chunk_records,
+                    time.monotonic() - t0, final_status,
+                    req.video_id, batch_label=req.batch_label,
+                )
             _restart_if_faulted()
 
     return StreamingResponse(

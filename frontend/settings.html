@@ -17,6 +17,8 @@
       <span id="badge" class="badge" title="backend status">connecting…</span>
     </div>
     <div class="header-actions">
+      <a class="btn-link ghost" href="live.html" title="Continuous analysis from your webcam">📷 Live View</a>
+      <a class="btn-link ghost" href="batch.html" title="Run one question across many videos">🗂 Batch</a>
       <a class="btn-link ghost" href="analytics.html" title="Usage history &amp; stats">📊 Analytics</a>
       <a class="btn-link ghost" href="index.html">← Back to chat</a>
     </div>
@@ -38,6 +40,18 @@
         below, which stays constant across every chunk in a run.
       </p>
       <div id="fields-segment" class="fields"></div>
+    </section>
+
+    <!-- Default prompt / rules -->
+    <section class="card">
+      <h2>Default prompt</h2>
+      <p class="card-hint">
+        Standing rules or definitions, prepended to every question before it reaches the
+        model — on every chunk of every video, regardless of what's actually asked.
+        Use it to pin down definitions the model should apply consistently (what counts
+        as a "yes", terms to watch for) instead of restating them in every question.
+      </p>
+      <div id="fields-prompt" class="fields"></div>
     </section>
 
     <!-- Generation -->

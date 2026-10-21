@@ -16,19 +16,31 @@ router = APIRouter(prefix="/api/history", tags=["history"])
 @router.get("")
 async def list_history(
     q: str = "", date_from: Optional[float] = None, date_to: Optional[float] = None,
-    limit: int = 50, offset: int = 0,
+    limit: int = 50, offset: int = 0, batch: Optional[str] = None,
 ):
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
-    items, total = await asyncio.to_thread(
-        history.list_records, q or None, date_from, date_to, limit, offset
-    )
+    # Already drilled into one batch (the Batch Processing page's "View every run from
+    # this batch" link, or the batch filter box) -> a flat list of its runs, same as
+    # before. Otherwise, group each batch's runs into one collapsible entry so a
+    # 30-video batch doesn't swamp the table - see history.list_records_grouped.
+    if batch:
+        items, total = await asyncio.to_thread(
+            history.list_records, q or None, date_from, date_to, limit, offset, batch
+        )
+    else:
+        items, total = await asyncio.to_thread(
+            history.list_records_grouped, q or None, date_from, date_to, limit, offset
+        )
     return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
 @router.get("/stats")
-async def get_stats(date_from: Optional[float] = None, date_to: Optional[float] = None):
-    return await asyncio.to_thread(history.get_stats, date_from, date_to)
+async def get_stats(
+    date_from: Optional[float] = None, date_to: Optional[float] = None,
+    batch: Optional[str] = None,
+):
+    return await asyncio.to_thread(history.get_stats, date_from, date_to, batch or None)
 
 
 @router.get("/export/{fmt}")
@@ -59,6 +71,21 @@ async def delete_one(record_id: str):
     if not ok:
         raise HTTPException(status_code=404, detail="history record not found")
     return {"deleted": True}
+
+
+@router.get("/{record_id}/export/{fmt}")
+async def export_one(record_id: str, fmt: str):
+    if fmt not in ("csv", "json"):
+        raise HTTPException(status_code=400, detail="format must be 'csv' or 'json'")
+    result = await asyncio.to_thread(history.export_record, record_id, fmt)
+    if result is None:
+        raise HTTPException(status_code=404, detail="history record not found")
+    data, media_type, filename = result
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/{record_id}/video")

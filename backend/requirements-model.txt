@@ -18,3 +18,6 @@ av              # video decoding for the processor
 
 # Optional - only if you pass --flash-attn2 (Linux / prebuilt wheels; not native Windows):
 # flash-attn
+
+# Optional - only if you pass --quantize 4bit|8bit (loads weights via bitsandbytes):
+# bitsandbytes
