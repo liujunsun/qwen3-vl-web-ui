@@ -895,9 +895,11 @@ details.seg-card[open] > summary::before { transform: rotate(90deg); }
   border: 1px solid var(--border);
   overflow: hidden;
 }
-/* Run detail modal: wide enough for the video + chunk list to sit side by side. */
+/* Run detail modal: wide and tall enough for a large video plus the meta/chunk
+   columns below it. */
 #detail-modal .modal {
-  width: min(1240px, 96vw);
+  width: min(1480px, 96vw);
+  max-height: 94vh;
 }
 .modal-head {
   display: flex;
@@ -920,18 +922,30 @@ details.seg-card[open] > summary::before { transform: rotate(90deg); }
 .detail-nav-pos { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .modal-body { padding: 16px; overflow-y: auto; }
 
-/* Run detail: video/meta pinned on the left, chunk list scrolling independently on
-   the right, so a highlighted chunk far down the list stays beside the clip instead
-   of needing a scroll away from it. */
+/* Run detail: the video spans the full width up top so it's large and visible
+   without scrolling. Below it, meta/prompt sit on the left, chunk list scrolls
+   independently on the right, so a highlighted chunk far down the list stays
+   beside the meta instead of needing a scroll away from it. */
 .modal-body.detail-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow: hidden;
+  min-height: 0;
+}
+.detail-video-wrap {
+  flex: 0 0 auto;
+}
+.detail-columns {
   display: flex;
   align-items: stretch;
   gap: 20px;
   overflow: hidden;
   min-height: 0;
+  flex: 1;
 }
 .detail-left {
-  flex: 0 0 min(400px, 42%);
+  flex: 0 0 min(420px, 38%);
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
@@ -946,7 +960,7 @@ details.seg-card[open] > summary::before { transform: rotate(90deg); }
   padding-right: 2px;
 }
 @media (max-width: 760px) {
-  .modal-body.detail-grid { flex-direction: column; overflow-y: auto; }
+  .detail-columns { flex-direction: column; overflow-y: auto; }
   .detail-left, .detail-right { flex: none; width: 100%; overflow: visible; }
   .detail-left { border-right: none; padding-right: 0; border-bottom: 1px solid var(--border); padding-bottom: 14px; }
 }
@@ -978,13 +992,13 @@ details.seg-card[open] > summary::before { transform: rotate(90deg); }
 }
 .detail-video {
   width: 100%;
-  max-height: 40vh;
+  max-height: 56vh;
   border-radius: 10px;
   background: #000;
-  margin-top: 10px;
   display: block;
+  margin: 0 auto;
 }
-.detail-video-note { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
+.detail-video-note { color: var(--muted); font-size: 13px; margin: 0; }
 
 /* Slim timeline under the video, one segment per chunk — hover (or drag/play the
    video above) to see which chunk card lines up with that point in the clip. */

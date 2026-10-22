@@ -790,14 +790,21 @@ async function openDetail(id) {
   body.innerHTML = "";
   body.classList.add("detail-grid");
 
-  // Video + meta stay pinned on the left; the chunk list scrolls independently on
-  // the right, so a highlighted chunk far down the list (e.g. #40) is always visible
-  // beside the clip instead of requiring a scroll away from it.
+  // Video stays pinned across the top, full width, so it's large and visible without
+  // scrolling. Meta/prompt sit on the left below it; the chunk list scrolls
+  // independently on the right, so a highlighted chunk far down the list (e.g. #40)
+  // is always visible beside the meta instead of requiring a scroll away from it.
+  const videoWrap = document.createElement("div");
+  videoWrap.className = "detail-video-wrap";
+
+  const columns = document.createElement("div");
+  columns.className = "detail-columns";
   const left = document.createElement("div");
   left.className = "detail-left";
   const right = document.createElement("div");
   right.className = "detail-right";
-  body.append(left, right);
+  columns.append(left, right);
+  body.append(videoWrap, columns);
 
   const meta = document.createElement("div");
   meta.className = "detail-meta";
@@ -881,7 +888,7 @@ async function openDetail(id) {
         setActiveChunk(match ? match.index : -1);
       }
     });
-    left.appendChild(video);
+    videoWrap.appendChild(video);
 
     const track = document.createElement("div");
     track.className = "detail-chunk-track";
@@ -904,12 +911,12 @@ async function openDetail(id) {
       const match = rec.chunks.find((c) => video.currentTime >= c.start && video.currentTime < c.end);
       setActiveChunk(match ? match.index : -1);
     });
-    left.appendChild(track);
+    videoWrap.appendChild(track);
   } else {
     const note = document.createElement("p");
     note.className = "detail-video-note";
     note.textContent = "Archived video has expired (or was never saved) — only the record remains.";
-    left.appendChild(note);
+    videoWrap.appendChild(note);
   }
 
   const chunksLabel = document.createElement("div");

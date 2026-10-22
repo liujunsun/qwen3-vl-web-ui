@@ -14,29 +14,11 @@ A restructured version of the Qwen3-VL web demo, split into a **backend API** an
 │   ├── index.html / app.js           chat + video stage
 │   ├── settings.html / settings.js   live generation defaults
 │   ├── analytics.html / analytics.js usage history + stats dashboard
+│   ├── batch.html / batch.js         run one prompt across many videos
+│   ├── live.html / live.js           webcam live view
 │   └── markdown.js                   shared markdown renderer
 └── Videos/         drop your own test clips here (git-ignored)
 ```
-
-## Why this layout is fast
-
-The backend loads `Qwen3-VL-8B-Instruct` **once** at startup, keeps it resident on a
-single GPU (`cuda:0`), runs a warmup generation, and streams tokens over SSE. There is no
-per-request model load and no multi-GPU split overhead. On native Windows this HF backend
-is the lowest-latency option available (vLLM is Linux-only).
-
-Video is sampled by `backend/app/video.py`, which walks the container once and converts
-only the frames it keeps, instead of letting transformers decode the whole file first —
-measured **33× faster** on a 14.5 s clip (16.7 s → 0.5 s) and ~48× on a 3-minute one, with
-memory bounded by the frame cap rather than by clip length. The sampled frames go to the
-processor with `do_sample_frames=False`; both paths were checked to produce byte-identical
-`input_ids` and pixel values.
-
-Every video question is answered **chunk-by-chunk** (see
-[Segmented analysis](#segmented-analysis)) — there is no whole-clip pass, so a
-10-minute video never has to fit in one prompt. Each chunk's answer is independent:
-nothing from an earlier chunk is fed back into the model, and there is no final
-reconciliation pass, so the model never has to hold previous output in its context.
 
 ## Requirements
 
@@ -79,29 +61,6 @@ loading](#quantized-loading-smaller-vram-footprint) below.
 python run.py -c Qwen/Qwen3-VL-32B-Instruct --quantize 4bit
 ```
 
-### Useful flags
-
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `-c, --checkpoint-path` | `Qwen/Qwen3-VL-8B-Instruct` | model name or local path |
-| `--device` | `cuda:0` | `cuda:0` (one GPU, fastest) · `auto` (split) · `cpu` |
-| `--flash-attn2` | off | use flash-attention (needs `flash-attn` installed) |
-| `--quantize` | `none` | `none` · `4bit` · `8bit` — load weights quantized via `bitsandbytes` to fit a bigger model in less VRAM (needs `pip install bitsandbytes`); see [Quantized loading](#quantized-loading-smaller-vram-footprint) |
-| `--max-new-tokens` | `1024` | default generation length |
-| `--segment-seconds` | `30` | seconds of video per chunk — every video question is answered chunk-by-chunk, there is no whole-clip option |
-| `--sample-fps` | `1.0` | frames sampled per second of video, per chunk — constant for every chunk in a run |
-| `--segment-overlap-frames` | `4` | frames of the previous chunk carried into the next |
-| `--max-video-tokens` | `4096` | visual tokens per chunk; frames are downscaled to fit. The main VRAM knob — lowering fps alone does not save memory, it only makes each frame larger |
-| `--history-retention-days` | `30` | days an archived video is kept for the [analytics dashboard](#analytics-dashboard) before it's deleted (`0` = never archive video, metadata only); the run record itself is kept forever |
-| `--host` / `--port` | `127.0.0.1` / `8000` | bind address |
-| `--motion-threshold` | `0.0` | skip chunks where less than this % of the picture changes (`0` = off) |
-| `--supervise` / `--no-supervise` | on | restart the server automatically after a crash or unrecoverable GPU error |
-| `--reload` | off | dev auto-reload (also reloads the model) |
-
-Video frame rate, frame cap, and frame size are not flags — every chunk derives them
-automatically from its own length (`video.optimize_video_params`), so there is nothing to
-tune there.
-
 ### Startup preflight (frees GPU memory before loading the model)
 
 Every start runs a preflight step that unloads resident **Ollama** models, drops the
@@ -119,7 +78,7 @@ holding VRAM.
 Example — refuse to start unless GPU 0 has 20 GB free, after clearing Ollama:
 
 ```powershell
-python run.py -c Qwen/Qwen3-VL-8B-Instruct --min-free-gb 20 --strict-vram
+python run.py -c Qwen/Qwen3-VL-8B-Instruct
 ```
 
 The preflight only manages Ollama and our own cache; it lists other GPU processes
@@ -190,15 +149,22 @@ failure such as the port already being in use.
 
 `⚙ Settings` in the header opens **`frontend/settings.html`**, which edits the defaults the
 server applies to every new request. **No model reload** — changes take effect on the next
-message, and are persisted to `backend/settings.json` so they survive a restart. The page
-is deliberately small: video sampling has no manual knobs (every chunk derives its own
-fps / frame cap / frame size from its length), and generation has no sampling knobs
-(`generate()` always uses the checkpoint's own `generation_config`, unmodified).
+message, and are persisted to `backend/settings.json` so they survive a restart. Controls
+are built from the `fields` block `GET /api/settings` returns, so ranges, labels, and help
+text live in exactly one place (`backend/app/runtime_settings.py`'s `FIELD_SPEC`) and the
+frontend never hardcodes a bound. Generation itself still has no sampling knobs —
+`generate()` always uses the checkpoint's own `generation_config`, unmodified — but video
+sampling does: fps and the per-chunk token budget are both editable rather than purely
+derived from chunk length.
 
 | Editable live | Why it is safe to change |
 | --- | --- |
 | `max_new_tokens` | a `generate()` argument — caps response length |
 | `segment_seconds`, `segment_overlap_frames` | shape the chunks every video question is split into (see [segmented analysis](#segmented-analysis)) |
+| `sample_fps` | frames sampled per second of video, per chunk — the same rate for every chunk in a run, including a shorter final chunk |
+| `max_video_tokens` | the main VRAM knob — each chunk's frames are downscaled to fit this many visual tokens; lowering fps alone doesn't save memory on its own |
+| `motion_threshold` | the [Motion skip](#motion-skip) threshold |
+| `default_prompt` | prepended to every question on every chunk of every video — standing rules/definitions that should always apply regardless of what's asked |
 
 Values resolve in this order:
 
@@ -218,10 +184,11 @@ and a frontend-editable checkpoint path would let anyone who can reach it pull a
 weights onto the GPU box.
 
 `max_new_tokens` defaults to `1024`, matching `web_demo_mm.py`'s
-`gen_kwargs = {'max_new_tokens': 1024, ...}`. Video frame rate / frame cap / frame size are
-never a setting — they always come from `video.optimize_video_params`, which sample
-densely on short chunks and thins out (down to ~0.25 fps and 640 px) as chunk length
-grows, so decode time and the raw-frame buffer stay bounded regardless of clip length.
+`gen_kwargs = {'max_new_tokens': 1024, ...}`. Frame cap and frame size still come from
+`video.optimize_video_params`, derived from `sample_fps`, `max_video_tokens`, and the
+chunk's own length, so decode time and the raw-frame buffer stay bounded regardless of
+clip length — `sample_fps` just pins the rate that derivation starts from, instead of it
+being picked from a duration-based table.
 
 ## Video stage
 
@@ -245,12 +212,14 @@ the GPU out of memory or blows the stream timeout during prefill, and lowering F
 frame cap does not help, because it is still one giant prompt. So there is no whole-clip
 option: every video question runs chunk-by-chunk, like this:
 
-1. The clip is split into equal chunks (**Chunk length**, default 60 s).
+1. The clip is split into equal chunks (**Chunk length**, default 30 s).
 2. `POST /api/chat/segmented` streams a **separate answer per chunk** as soon as it is
    ready. Each chunk is sampled with `video.sample_frames_window` — a `container.seek`
    to that time span only, so cost is bounded by chunk length, not by clip length or by
-   where the chunk sits. Frame rate / cap / size are derived automatically from the
-   chunk's own length (`video.optimize_video_params`).
+   where the chunk sits. Frame rate is the constant **Sampling rate (fps)** setting,
+   the same for every chunk in a run; frame cap and frame size are derived from that
+   rate, the chunk's own length, and the **Max video tokens** budget
+   (`video.optimize_video_params`).
 3. Chunks 2…N prepend the previous chunk's last few sampled frames (**Carry-over
    frames**, default 4) so a cut landing on a frozen or black frame still has live
    context. Frame indices stay absolute, so Qwen3-VL's `<12.5 seconds>` markers are
@@ -288,7 +257,7 @@ each chunk reports it separately rather than the run producing one merged count.
 The whole run holds the single generation lock, so ordinary `/api/chat` requests wait
 until it finishes.
 
-This whole section is what the **📷 Live Feed** button in the header is *not* — that's
+This whole section is what the **📷 Live View** button in the header is *not* — that's
 a different input entirely (your camera, not a staged file); see
 [Live View (webcam)](#live-view-webcam) below.
 
@@ -296,9 +265,10 @@ a different input entirely (your camera, not a staged file); see
 
 Before a chunk is sent to the model, `video.motion_score` measures what % of the
 picture changes between its sampled frames. Below **Motion skip threshold** (default
-1%) the chunk is marked "skipped · no motion" and the model is not run - on a fixed
-camera, idle chunks measured 0.3-0.9% and anything with people or vehicles moving
-1.5%+. The first chunk is never skipped. Set the threshold to 0 to analyse every chunk.
+0%, i.e. off) the chunk is marked "skipped · no motion" and the model is not run - on a
+fixed camera, idle chunks measured 0.3-0.9% and anything with people or vehicles moving
+1.5%+, so a value around 1% is a reasonable threshold to turn it on with. The first
+chunk is never skipped.
 
 ### Concise timeline
 
@@ -316,14 +286,15 @@ span.
 
 ## Live View (webcam)
 
-**📷 Live Feed** in the composer is a genuinely different input from everything above:
-your browser's own camera (`getUserMedia`), not a staged file — there is no fixed
-duration and no upfront chunk plan, so it isn't another mode over
-[Segmented analysis](#segmented-analysis), it's a separate entry point. Starting it and
-staging a file are mutually exclusive — doing one drops the other.
+**📷 Live View** in the header opens **`frontend/live.html`** — its own page with its own
+camera toggle, composer, and transcript, not a mode bolted onto
+[Segmented analysis](#segmented-analysis) or [Batch Processing](#batch-processing). It
+is a genuinely different input from everything above: your browser's own camera
+(`getUserMedia`), not a staged file — there is no fixed duration and no upfront chunk
+plan.
 
-Once you type a question and hit **Send** (it becomes **Stop** for the duration), the
-browser loops indefinitely until you stop it:
+Hit **📷 Start camera** to begin the preview, then type a question and hit **Send** (it
+becomes **Stop** for the duration) — the browser loops indefinitely until you stop it:
 
 1. Record one clip with `MediaRecorder`, exactly **Chunk length** seconds long.
 2. Upload it (`POST /api/upload` — same endpoint as any other file; `.webm`, what
@@ -423,13 +394,6 @@ The dashboard has:
   button that removes the run and its video permanently.
 - **Export** — CSV or JSON of whatever the current filters match, via
   `/api/history/export/{csv|json}`.
-
-## Customizing the frontend
-
-Everything visual is in `frontend/` — plain HTML/CSS/JS, no toolchain. Edit and refresh.
-Because the API contract above is stable, you can also replace `frontend/` with a
-React/Vite/Next app later without touching the backend; point it at the same `/api/*`
-routes (or set the backend `--host 0.0.0.0` and serve the SPA separately).
 
 ## Credits & license
 
